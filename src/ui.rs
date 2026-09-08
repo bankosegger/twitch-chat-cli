@@ -40,13 +40,38 @@ fn name_color(name: &str) -> (u8, u8, u8) {
     NAME_PALETTE[(hash as usize) % NAME_PALETTE.len()]
 }
 
-fn build_tokens(msg: &ChatMessage) -> Vec<Token> {
+const MOD_HIGHLIGHT_BG: Color = Color::Rgb(20, 60, 30);
+const SUB_HIGHLIGHT_BG: Color = Color::Rgb(55, 25, 65);
+
+fn is_mod(msg: &ChatMessage) -> bool {
+    msg.badges.iter().any(|b| b == "MOD" || b == "BROADCASTER")
+}
+
+fn is_sub(msg: &ChatMessage) -> bool {
+    msg.badges.iter().any(|b| b == "SUB")
+}
+
+fn highlight_bg(msg: &ChatMessage, app: &App) -> Option<Color> {
+    if app.highlight_mods && is_mod(msg) {
+        Some(MOD_HIGHLIGHT_BG)
+    } else if app.highlight_subs && is_sub(msg) {
+        Some(SUB_HIGHLIGHT_BG)
+    } else {
+        None
+    }
+}
+
+fn build_tokens(msg: &ChatMessage, bg: Option<Color>) -> Vec<Token> {
     let mut tokens = Vec::new();
+    let apply_bg = |style: Style| match bg {
+        Some(color) => style.bg(color),
+        None => style,
+    };
 
     for badge in &msg.badges {
         tokens.push(Token {
             text: format!("[{badge}]"),
-            style: Style::default().fg(Color::DarkGray),
+            style: apply_bg(Style::default().fg(Color::DarkGray)),
         });
     }
 
@@ -56,13 +81,13 @@ fn build_tokens(msg: &ChatMessage) -> Vec<Token> {
         .unwrap_or_else(|| name_color(&msg.display_name));
     tokens.push(Token {
         text: format!("{}:", msg.display_name),
-        style: Style::default().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD),
+        style: apply_bg(Style::default().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)),
     });
 
     for word in msg.text.split_whitespace() {
         tokens.push(Token {
             text: word.to_string(),
-            style: Style::default().fg(Color::White),
+            style: apply_bg(Style::default().fg(Color::White)),
         });
     }
 
@@ -147,16 +172,20 @@ fn wrap_tokens(tokens: Vec<Token>, width: usize) -> Vec<Vec<Token>> {
     lines
 }
 
-fn message_to_lines(msg: &ChatMessage, width: usize) -> Vec<Line<'static>> {
-    let tokens = build_tokens(msg);
+fn message_to_lines(msg: &ChatMessage, width: usize, bg: Option<Color>) -> Vec<Line<'static>> {
+    let tokens = build_tokens(msg, bg);
     let wrapped = wrap_tokens(tokens, width);
+    let space_style = match bg {
+        Some(color) => Style::default().bg(color),
+        None => Style::default(),
+    };
     wrapped
         .into_iter()
         .map(|line_tokens| {
             let mut spans = Vec::new();
             for (i, tok) in line_tokens.into_iter().enumerate() {
                 if i > 0 {
-                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(" ", space_style));
                 }
                 spans.push(Span::styled(tok.text, tok.style));
             }
@@ -193,16 +222,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Paragraph::new(status_line(app)), chunks[0]);
 
-    let chat_block = Block::default().borders(Borders::ALL).title(" chat ");
+    let effective_filter = app.effective_filter().to_string();
+    let title = if effective_filter.is_empty() {
+        " chat ".to_string()
+    } else {
+        format!(" chat · filter: {effective_filter} ")
+    };
+    let chat_block = Block::default().borders(Borders::ALL).title(title);
     let inner: Rect = chat_block.inner(chunks[1]);
     frame.render_widget(chat_block, chunks[1]);
 
     let width = inner.width as usize;
     let viewport = inner.height as usize;
 
+    let matched: Vec<&ChatMessage> = app.messages.iter().filter(|m| app.message_matches(m)).collect();
+
     let mut all_lines: Vec<Line<'static>> = Vec::new();
-    for msg in &app.messages {
-        all_lines.extend(message_to_lines(msg, width));
+    if matched.is_empty() && !effective_filter.is_empty() {
+        all_lines.push(Line::from(Span::styled(
+            format!("no messages match \"{effective_filter}\""),
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for msg in &matched {
+            all_lines.extend(message_to_lines(msg, width, highlight_bg(msg, app)));
+        }
     }
 
     app.last_total_lines = all_lines.len();
@@ -218,12 +262,46 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let paragraph = Paragraph::new(text).scroll((app.skip as u16, 0));
     frame.render_widget(paragraph, inner);
 
-    let footer = Line::from(vec![
-        Span::raw(format!("{} messages  ", app.messages.len())),
-        Span::styled(
-            "↑/↓ PgUp/PgDn Home/End scroll   q quit",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    let footer = if let Some(buf) = &app.filter_input {
+        Line::from(vec![
+            Span::styled("filter: ", Style::default().fg(Color::Cyan)),
+            Span::raw(buf.clone()),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "   Enter apply · Esc cancel · Ctrl+U clear",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        let count = if app.filter.is_empty() {
+            format!("{} messages  ", app.messages.len())
+        } else {
+            format!("{}/{} messages  ", matched.len(), app.messages.len())
+        };
+        let mods_style = if app.highlight_mods {
+            Style::default().fg(Color::White).bg(MOD_HIGHLIGHT_BG).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let subs_style = if app.highlight_subs {
+            Style::default().fg(Color::White).bg(SUB_HIGHLIGHT_BG).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        Line::from(vec![
+            Span::raw(count),
+            Span::styled(
+                "/ filter   ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" M mods ", mods_style),
+            Span::raw(" "),
+            Span::styled(" S subs ", subs_style),
+            Span::styled(
+                "   ↑/↓ PgUp/PgDn Home/End scroll   q quit",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    };
     frame.render_widget(Paragraph::new(footer), chunks[2]);
 }

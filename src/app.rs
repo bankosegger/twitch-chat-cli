@@ -21,6 +21,10 @@ pub struct App {
     pub last_total_lines: usize,
     pub last_viewport: usize,
     pub should_quit: bool,
+    pub filter: String,
+    pub filter_input: Option<String>,
+    pub highlight_mods: bool,
+    pub highlight_subs: bool,
 }
 
 impl App {
@@ -35,7 +39,71 @@ impl App {
             last_total_lines: 0,
             last_viewport: 0,
             should_quit: false,
+            filter: String::new(),
+            filter_input: None,
+            highlight_mods: false,
+            highlight_subs: false,
         }
+    }
+
+    pub fn toggle_highlight_mods(&mut self) {
+        self.highlight_mods = !self.highlight_mods;
+    }
+
+    pub fn toggle_highlight_subs(&mut self) {
+        self.highlight_subs = !self.highlight_subs;
+    }
+
+    pub fn is_editing_filter(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// The filter text currently in effect for rendering: the in-progress
+    /// edit buffer while editing (for live preview), else the applied filter.
+    pub fn effective_filter(&self) -> &str {
+        self.filter_input.as_deref().unwrap_or(&self.filter)
+    }
+
+    pub fn message_matches(&self, msg: &ChatMessage) -> bool {
+        let needle = self.effective_filter();
+        if needle.is_empty() {
+            return true;
+        }
+        let needle = needle.to_lowercase();
+        msg.display_name.to_lowercase().contains(&needle) || msg.text.to_lowercase().contains(&needle)
+    }
+
+    pub fn start_filter_edit(&mut self) {
+        self.filter_input = Some(self.filter.clone());
+    }
+
+    pub fn filter_push_char(&mut self, c: char) {
+        if let Some(buf) = &mut self.filter_input {
+            buf.push(c);
+        }
+    }
+
+    pub fn filter_backspace(&mut self) {
+        if let Some(buf) = &mut self.filter_input {
+            buf.pop();
+        }
+    }
+
+    pub fn filter_clear_buffer(&mut self) {
+        if let Some(buf) = &mut self.filter_input {
+            buf.clear();
+        }
+    }
+
+    pub fn confirm_filter(&mut self) {
+        if let Some(buf) = self.filter_input.take() {
+            self.filter = buf;
+            self.scroll_to_bottom();
+        }
+    }
+
+    pub fn cancel_filter_edit(&mut self) {
+        self.filter_input = None;
     }
 
     pub fn push_message(&mut self, msg: ChatMessage) {

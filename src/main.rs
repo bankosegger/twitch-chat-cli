@@ -60,18 +60,34 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, channel: Str
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-                            KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
-                                app.should_quit = true;
+                        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('c')
+                        {
+                            app.should_quit = true;
+                        } else if app.is_editing_filter() {
+                            let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                            match key.code {
+                                KeyCode::Enter => app.confirm_filter(),
+                                KeyCode::Esc => app.cancel_filter_edit(),
+                                KeyCode::Backspace => app.filter_backspace(),
+                                KeyCode::Char('u') if ctrl => app.filter_clear_buffer(),
+                                KeyCode::Char(c) if !ctrl => app.filter_push_char(c),
+                                _ => {}
                             }
-                            KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
-                            KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
-                            KeyCode::PageUp => app.scroll_up(app.last_viewport.max(1)),
-                            KeyCode::PageDown => app.scroll_down(app.last_viewport.max(1)),
-                            KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
-                            KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
-                            _ => {}
+                        } else {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                                KeyCode::Char('/') => app.start_filter_edit(),
+                                KeyCode::Char('m') | KeyCode::Char('M') => app.toggle_highlight_mods(),
+                                KeyCode::Char('s') | KeyCode::Char('S') => app.toggle_highlight_subs(),
+                                KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
+                                KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
+                                KeyCode::PageUp => app.scroll_up(app.last_viewport.max(1)),
+                                KeyCode::PageDown => app.scroll_down(app.last_viewport.max(1)),
+                                KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
+                                KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
+                                _ => {}
+                            }
                         }
                         dirty = true;
                     }
