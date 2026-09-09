@@ -1,11 +1,11 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, ConnStatus};
+use crate::app::{App, ConnStatus, StreamPanel};
 use crate::irc::ChatMessage;
 
 const NAME_PALETTE: [(u8, u8, u8); 15] = [
@@ -213,14 +213,77 @@ fn status_line(app: &App) -> Line<'static> {
     ])
 }
 
+fn stream_panel(app: &App) -> Paragraph<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let (line1, line2) = match &app.stream_panel {
+        StreamPanel::Disabled => (
+            Line::from(Span::styled("stream info disabled", dim)),
+            Line::from(Span::styled(
+                "set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to enable",
+                dim,
+            )),
+        ),
+        StreamPanel::Loading => (Line::from(Span::styled("loading stream info...", dim)), Line::from("")),
+        StreamPanel::Offline => (
+            Line::from(Span::styled(format!("{} is offline", app.channel), dim)),
+            Line::from(""),
+        ),
+        StreamPanel::Error(e) => (
+            Line::from(Span::styled(format!("stream info error: {e}"), Style::default().fg(Color::Red))),
+            Line::from(""),
+        ),
+        StreamPanel::Live(info) => (
+            Line::from(Span::styled(
+                info.title.trim().to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled("Game: ", dim),
+                Span::raw(if info.game_name.is_empty() {
+                    "-".to_string()
+                } else {
+                    info.game_name.clone()
+                }),
+                Span::styled("   Viewers: ", dim),
+                Span::styled(
+                    info.viewer_count.to_string(),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("   Live for: ", dim),
+                Span::raw(crate::helix::format_uptime(info.started_at)),
+            ]),
+        ),
+    };
+
+    let mods_line = if app.mods_seen.is_empty() {
+        Line::from(Span::styled("Mods seen chatting: (none yet)", dim))
+    } else {
+        let names = app.mods_seen.iter().cloned().collect::<Vec<_>>().join(", ");
+        Line::from(vec![
+            Span::styled("Mods seen chatting: ", dim),
+            Span::styled(names, Style::default().fg(Color::Rgb(60, 200, 110))),
+        ])
+    };
+
+    Paragraph::new(vec![line1, line2, mods_line])
+        .block(Block::default().borders(Borders::ALL).title(" stream "))
+        .wrap(Wrap { trim: true })
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(5),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     frame.render_widget(Paragraph::new(status_line(app)), chunks[0]);
+    frame.render_widget(stream_panel(app), chunks[1]);
 
     let effective_filter = app.effective_filter().to_string();
     let title = if effective_filter.is_empty() {
@@ -229,8 +292,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         format!(" chat · filter: {effective_filter} ")
     };
     let chat_block = Block::default().borders(Borders::ALL).title(title);
-    let inner: Rect = chat_block.inner(chunks[1]);
-    frame.render_widget(chat_block, chunks[1]);
+    let inner: Rect = chat_block.inner(chunks[2]);
+    frame.render_widget(chat_block, chunks[2]);
 
     let width = inner.width as usize;
     let viewport = inner.height as usize;
@@ -303,5 +366,5 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ),
         ])
     };
-    frame.render_widget(Paragraph::new(footer), chunks[2]);
+    frame.render_widget(Paragraph::new(footer), chunks[3]);
 }

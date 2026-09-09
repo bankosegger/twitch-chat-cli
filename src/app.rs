@@ -1,5 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
+use crate::helix::{StreamInfo, StreamStatus};
 use crate::irc::ChatMessage;
 
 const MAX_MESSAGES: usize = 500;
@@ -9,6 +10,16 @@ pub enum ConnStatus {
     Connecting,
     Connected,
     Disconnected(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum StreamPanel {
+    /// No TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET configured.
+    Disabled,
+    Loading,
+    Live(StreamInfo),
+    Offline,
+    Error(String),
 }
 
 pub struct App {
@@ -25,10 +36,12 @@ pub struct App {
     pub filter_input: Option<String>,
     pub highlight_mods: bool,
     pub highlight_subs: bool,
+    pub stream_panel: StreamPanel,
+    pub mods_seen: BTreeSet<String>,
 }
 
 impl App {
-    pub fn new(channel: String) -> Self {
+    pub fn new(channel: String, stream_info_enabled: bool) -> Self {
         Self {
             channel,
             messages: VecDeque::new(),
@@ -43,7 +56,21 @@ impl App {
             filter_input: None,
             highlight_mods: false,
             highlight_subs: false,
+            stream_panel: if stream_info_enabled {
+                StreamPanel::Loading
+            } else {
+                StreamPanel::Disabled
+            },
+            mods_seen: BTreeSet::new(),
         }
+    }
+
+    pub fn set_stream_status(&mut self, status: StreamStatus) {
+        self.stream_panel = match status {
+            StreamStatus::Live(info) => StreamPanel::Live(info),
+            StreamStatus::Offline => StreamPanel::Offline,
+            StreamStatus::Error(e) => StreamPanel::Error(e),
+        };
     }
 
     pub fn toggle_highlight_mods(&mut self) {
@@ -107,6 +134,9 @@ impl App {
     }
 
     pub fn push_message(&mut self, msg: ChatMessage) {
+        if msg.badges.iter().any(|b| b == "MOD") {
+            self.mods_seen.insert(msg.display_name.clone());
+        }
         self.messages.push_back(msg);
         if self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();

@@ -1,7 +1,9 @@
 mod app;
+mod helix;
 mod irc;
 mod ui;
 
+use std::env;
 use std::io;
 use std::time::Duration;
 
@@ -15,6 +17,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use app::App;
+use helix::StreamStatus;
 use irc::ChatEvent;
 
 /// Watch a Twitch channel's chat in your terminal.
@@ -27,6 +30,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    dotenvy::dotenv().ok();
+
     let args = Args::parse();
     let channel = args.channel.trim_start_matches('#').to_string();
 
@@ -36,7 +41,12 @@ async fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, channel).await;
+    let credentials = match (env::var("TWITCH_CLIENT_ID"), env::var("TWITCH_CLIENT_SECRET")) {
+        (Ok(id), Ok(secret)) if !id.is_empty() && !secret.is_empty() => Some((id, secret)),
+        _ => None,
+    };
+
+    let result = run(&mut terminal, channel, credentials).await;
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -44,11 +54,21 @@ async fn main() -> io::Result<()> {
     result
 }
 
-async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, channel: String) -> io::Result<()> {
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    channel: String,
+    credentials: Option<(String, String)>,
+) -> io::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
     tokio::spawn(irc::run(channel.clone(), tx));
 
-    let mut app = App::new(channel);
+    let mut stream_rx = credentials.map(|(client_id, client_secret)| {
+        let (stx, srx) = mpsc::unbounded_channel::<StreamStatus>();
+        tokio::spawn(helix::run(channel.clone(), client_id, client_secret, stx));
+        srx
+    });
+
+    let mut app = App::new(channel, stream_rx.is_some());
     let mut events = EventStream::new();
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -119,6 +139,17 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, channel: Str
                         dirty = true;
                     }
                     None => {}
+                }
+            }
+            maybe_status = async {
+                match &mut stream_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(status) = maybe_status {
+                    app.set_stream_status(status);
+                    dirty = true;
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
