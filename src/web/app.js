@@ -31,7 +31,7 @@ async function api(path, params = {}) {
     if (value != null && value !== "") query.set(key, value);
   }
   const qs = query.toString();
-  const res = await fetch(`/api${path}${qs ? `?${qs}` : ""}`);
+  const res = await fetch(`api${path}${qs ? `?${qs}` : ""}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const err = new Error(body.error || `${res.status} ${res.statusText}`);
