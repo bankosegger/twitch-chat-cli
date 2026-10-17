@@ -1,0 +1,33 @@
+# Records chat and serves the web UI from one shared SQLite database.
+#
+#   docker compose up -d --build
+#   open http://localhost:8080
+#
+# Change the channels on the `record` service's command line.
+services:
+  record:
+    build: .
+    image: twitch-chat
+    command: ["record", "--db", "/data/chat.db", "papaplatte"]
+    volumes:
+      - chat-data:/data
+    restart: unless-stopped
+
+  web:
+    image: twitch-chat
+    command: ["serve", "--db", "/data/chat.db", "--bind", "0.0.0.0:8080"]
+    environment:
+      # Leave empty for no password. Set it in a .env file next to this one.
+      TWITCH_CHAT_PASSWORD: ${TWITCH_CHAT_PASSWORD:-}
+    ports:
+      # Only reachable from this machine. Use "8080:8080" to expose it to the
+      # network, and set TWITCH_CHAT_PASSWORD when you do.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - chat-data:/data
+    depends_on:
+      - record
+    restart: unless-stopped
+
+volumes:
+  chat-data:

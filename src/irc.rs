@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
@@ -8,12 +8,29 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const TWITCH_WS_URL: &str = "wss://irc-ws.chat.twitch.tv:443";
 
+/// Twitch allows anonymous connections to JOIN 20 channels per 10 seconds.
+const JOIN_BATCH: usize = 20;
+const JOIN_INTERVAL: Duration = Duration::from_secs(11);
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
+    /// Unique message id (`id` tag).
+    pub id: Option<String>,
+    /// Channel the message was sent in, lowercase, without '#'.
+    pub channel: String,
+    pub room_id: Option<String>,
+    pub user_id: Option<String>,
+    pub login: String,
     pub display_name: String,
     pub color: Option<(u8, u8, u8)>,
     pub badges: Vec<String>,
+    /// Unprocessed `badges` tag, e.g. `moderator/1,subscriber/12`.
+    pub badges_raw: String,
     pub text: String,
+    /// Unix milliseconds, from `tmi-sent-ts` (falls back to `received_at`).
+    pub sent_at: i64,
+    /// Unix milliseconds when this client parsed the message.
+    pub received_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -127,13 +144,62 @@ fn badge_labels(raw: &str) -> Vec<String> {
         .collect()
 }
 
-pub async fn run(channel: String, tx: mpsc::UnboundedSender<ChatEvent>) {
-    let mut backoff = Duration::from_secs(1);
-    let channel_lower = channel.to_lowercase();
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+
+fn build_message(parsed: &IrcLine<'_>) -> ChatMessage {
+    let tag = |key: &str| parsed.tags.get(key).cloned().filter(|s| !s.is_empty());
+
+    let received_at = now_millis();
+    let channel = parsed
+        .params
+        .first()
+        .map(|c| c.trim_start_matches('#').to_lowercase())
+        .unwrap_or_default();
+    let text = parsed.params.last().copied().unwrap_or("").to_string();
+    let login = parsed
+        .prefix
+        .and_then(|p| p.split('!').next())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| "unknown".to_string());
+    let display_name = tag("display-name").unwrap_or_else(|| login.clone());
+    let badges_raw = tag("badges").unwrap_or_default();
+
+    ChatMessage {
+        id: tag("id"),
+        channel,
+        room_id: tag("room-id"),
+        user_id: tag("user-id"),
+        login,
+        display_name,
+        color: tag("color").and_then(|c| parse_color(&c)),
+        badges: badge_labels(&badges_raw),
+        badges_raw,
+        text,
+        sent_at: tag("tmi-sent-ts")
+            .and_then(|ts| ts.parse().ok())
+            .unwrap_or(received_at),
+        received_at,
+    }
+}
+
+pub async fn run(channels: Vec<String>, tx: mpsc::Sender<ChatEvent>) {
+    let mut backoff = INITIAL_BACKOFF;
+    let channels: Vec<String> = channels
+        .iter()
+        .map(|c| c.trim_start_matches('#').to_lowercase())
+        .collect();
 
     loop {
-        if let Err(e) = connect_and_read(&channel_lower, &tx).await {
-            let _ = tx.send(ChatEvent::Disconnected(e));
+        if let Err(e) = connect_and_read(&channels, &tx, &mut backoff).await {
+            let _ = tx.send(ChatEvent::Disconnected(e)).await;
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
@@ -141,10 +207,11 @@ pub async fn run(channel: String, tx: mpsc::UnboundedSender<ChatEvent>) {
 }
 
 async fn connect_and_read(
-    channel: &str,
-    tx: &mpsc::UnboundedSender<ChatEvent>,
+    channels: &[String],
+    tx: &mpsc::Sender<ChatEvent>,
+    backoff: &mut Duration,
 ) -> Result<(), String> {
-    let _ = tx.send(ChatEvent::Connecting);
+    let _ = tx.send(ChatEvent::Connecting).await;
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(TWITCH_WS_URL)
         .await
@@ -165,12 +232,23 @@ async fn connect_and_read(
         .send(WsMessage::Text(format!("NICK {nick}")))
         .await
         .map_err(|e| format!("handshake failed: {e}"))?;
-    write
-        .send(WsMessage::Text(format!("JOIN #{channel}")))
-        .await
-        .map_err(|e| format!("join failed: {e}"))?;
+    for (i, batch) in channels.chunks(JOIN_BATCH).enumerate() {
+        if i > 0 {
+            tokio::time::sleep(JOIN_INTERVAL).await;
+        }
+        let list = batch
+            .iter()
+            .map(|c| format!("#{c}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        write
+            .send(WsMessage::Text(format!("JOIN {list}")))
+            .await
+            .map_err(|e| format!("join failed: {e}"))?;
+    }
 
-    let _ = tx.send(ChatEvent::Connected);
+    *backoff = INITIAL_BACKOFF;
+    let _ = tx.send(ChatEvent::Connected).await;
 
     loop {
         let msg = match read.next().await {
@@ -201,31 +279,11 @@ async fn connect_and_read(
                     let _ = write.send(WsMessage::Text(format!("PONG :{payload}"))).await;
                 }
                 "PRIVMSG" => {
-                    let text = parsed.params.last().copied().unwrap_or("").to_string();
-                    let display_name = parsed
-                        .tags
-                        .get("display-name")
-                        .cloned()
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| parsed.prefix.and_then(|p| p.split('!').next().map(String::from)))
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let color = parsed.tags.get("color").and_then(|c| parse_color(c));
-                    let badges = parsed
-                        .tags
-                        .get("badges")
-                        .map(|b| badge_labels(b))
-                        .unwrap_or_default();
-
-                    let _ = tx.send(ChatEvent::Message(ChatMessage {
-                        display_name,
-                        color,
-                        badges,
-                        text,
-                    }));
+                    let _ = tx.send(ChatEvent::Message(build_message(&parsed))).await;
                 }
                 "NOTICE" => {
                     let text = parsed.params.last().copied().unwrap_or("").to_string();
-                    let _ = tx.send(ChatEvent::SystemNotice(text));
+                    let _ = tx.send(ChatEvent::SystemNotice(text)).await;
                 }
                 "RECONNECT" => {
                     return Err("server requested reconnect".to_string());

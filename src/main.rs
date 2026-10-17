@@ -1,13 +1,18 @@
 mod app;
 mod helix;
 mod irc;
+mod record;
+mod store;
 mod ui;
+mod web;
 
 use std::env;
 use std::io;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
@@ -22,10 +27,46 @@ use irc::ChatEvent;
 
 /// Watch a Twitch channel's chat in your terminal.
 #[derive(Parser, Debug)]
-#[command(name = "twitch-chat", version, about)]
+#[command(
+    name = "twitch-chat",
+    version,
+    about,
+    args_conflicts_with_subcommands = true,
+    arg_required_else_help = true
+)]
 struct Args {
     /// Channel name (as it appears in the twitch.tv URL), with or without '#'
-    channel: String,
+    #[arg(required = true)]
+    channel: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run headless and store every chat message in a SQLite database
+    Record {
+        /// Channel names to record, with or without '#'
+        #[arg(required = true)]
+        channels: Vec<String>,
+
+        /// Path to the SQLite database (created if missing)
+        #[arg(long, default_value = "chat.db")]
+        db: PathBuf,
+    },
+    /// Serve a web UI for browsing and analysing a recorded database
+    ///
+    /// Set TWITCH_CHAT_PASSWORD to require HTTP basic auth (any username).
+    Serve {
+        /// Path to the SQLite database written by `record`
+        #[arg(long, default_value = "chat.db")]
+        db: PathBuf,
+
+        /// Address to listen on
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: SocketAddr,
+    },
 }
 
 #[tokio::main]
@@ -33,7 +74,19 @@ async fn main() -> io::Result<()> {
     dotenvy::dotenv().ok();
 
     let args = Args::parse();
-    let channel = args.channel.trim_start_matches('#').to_string();
+    match args.command {
+        Some(Command::Record { channels, db }) => return record::run(channels, &db).await,
+        Some(Command::Serve { db, bind }) => {
+            let password = env::var("TWITCH_CHAT_PASSWORD").ok().filter(|p| !p.is_empty());
+            return web::run(&db, bind, password).await;
+        }
+        None => {}
+    }
+    let channel = args
+        .channel
+        .expect("clap requires a channel")
+        .trim_start_matches('#')
+        .to_string();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -59,8 +112,8 @@ async fn run(
     channel: String,
     credentials: Option<(String, String)>,
 ) -> io::Result<()> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
-    tokio::spawn(irc::run(channel.clone(), tx));
+    let (tx, mut rx) = mpsc::channel::<ChatEvent>(1024);
+    tokio::spawn(irc::run(vec![channel.clone()], tx));
 
     let mut stream_rx = credentials.map(|(client_id, client_secret)| {
         let (stx, srx) = mpsc::unbounded_channel::<StreamStatus>();
