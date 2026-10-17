@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset: twitch-chat-linux-x86_64
+          - runner: ubuntu-24.04-arm
+            asset: twitch-chat-linux-aarch64
+          - runner: macos-15-intel
+            asset: twitch-chat-macos-x86_64
+          - runner: macos-latest
+            asset: twitch-chat-macos-aarch64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release --locked
+    - name: Rename binary
+      run: cp target/release/twitch-chat ${{ matrix.asset }}
+    - name: Upload to release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ${{ matrix.asset }}
