@@ -495,6 +495,10 @@ struct MessagesParams {
     q: Option<String>,
     /// Cursor from a previous page's `next`.
     before: Option<String>,
+    /// Only messages with an id above this, for polling. The oldest new
+    /// messages come first when there are more than `limit`, so repeated polls
+    /// never skip any.
+    after: Option<i64>,
     limit: Option<usize>,
 }
 
@@ -533,7 +537,25 @@ async fn messages(
         );
     }
 
+    let after = p.after;
+    if let Some(after) = after {
+        filter.add("id > ?", [Value::Integer(after)]);
+    }
+
     db.query(move |conn| {
+        if after.is_some() {
+            let sql = format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages {} ORDER BY id LIMIT {limit}",
+                filter.sql()
+            );
+            let mut messages: Vec<Message> = conn
+                .prepare(&sql)?
+                .query_map(params_from_iter(&filter.args), message_from_row)?
+                .collect::<Result<_, _>>()?;
+            messages.reverse();
+            return Ok(MessagePage { messages, next: None });
+        }
+
         let sql = format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages {} ORDER BY sent_at DESC, id DESC LIMIT {}",
             filter.sql(),

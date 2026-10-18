@@ -208,6 +208,32 @@ details.data-table .scroll { max-height: 280px; overflow: auto; margin-top: 6px;
 .msg .time a:hover { color: var(--text-primary); text-decoration: none; }
 .msg .name { font-weight: 700; }
 .msg .channel { color: var(--text-muted); margin-right: 6px; }
+.msg.new { animation: msg-new 1.5s ease-out; }
+@keyframes msg-new { from { background: rgba(167, 139, 250, 0.18); } }
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  vertical-align: middle;
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: live-pulse 2s ease-in-out infinite;
+}
+@keyframes live-pulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) {
+  .msg.new, .live::before { animation: none; }
+}
 .badge {
   display: inline-block;
   min-width: 14px;

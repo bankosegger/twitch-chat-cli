@@ -192,16 +192,23 @@ function messageRow(m, { showChannel = false, focus = false } = {}) {
   );
 }
 
-/** A message list that loads older pages on demand. */
+const LIVE_POLL_MS = 2000;
+
+/**
+ * A message list that loads older pages on demand. `live()` starts polling for
+ * new messages, adding them at the top, and returns a function that stops it.
+ */
 function pagedMessages(params, { showChannel = false, emptyText = "No messages." } = {}) {
   const list = el("ul", { class: "messages" });
   const footer = el("div", { class: "more" });
   const root = el("div", {}, list, footer);
+  let newestId = 0;
 
   async function load(before) {
     footer.replaceChildren(el("span", { class: "muted" }, "Loading…"));
     try {
       const page = await api("/messages", { ...params, before });
+      for (const m of page.messages) newestId = Math.max(newestId, m.id);
       list.append(...page.messages.map((m) => messageRow(m, { showChannel })));
       footer.replaceChildren();
       if (!list.children.length) footer.append(el("p", { class: "muted" }, emptyText));
@@ -211,8 +218,42 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
     }
   }
 
+  async function poll() {
+    const page = await api("/messages", { ...params, after: newestId, limit: 200 });
+    if (!page.messages.length) return;
+    newestId = Math.max(newestId, ...page.messages.map((m) => m.id));
+    const rows = page.messages.map((m) => {
+      const row = messageRow(m, { showChannel });
+      row.classList.add("new");
+      return row;
+    });
+    list.prepend(...rows);
+    if (list.children.length === rows.length) footer.querySelector("p.muted")?.remove();
+  }
+
+  function live() {
+    let stopped = false;
+    let timer;
+    const tick = async () => {
+      // Skip polls while the tab is hidden; a busy chat catches up on return.
+      if (!document.hidden) await poll().catch(() => {});
+      if (!stopped) timer = setTimeout(tick, LIVE_POLL_MS);
+    };
+    ready.then(() => {
+      if (!stopped) timer = setTimeout(tick, LIVE_POLL_MS);
+    });
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }
+
   const ready = load(null);
-  return { root, ready };
+  return { root, ready, live };
+}
+
+function liveBadge() {
+  return el("span", { class: "live", title: "New messages appear automatically" }, "Live");
 }
 
 function statTile(label, value, sub) {
@@ -510,13 +551,19 @@ async function viewChannel(channel, params) {
       el("div", { class: "card" }, el("h2", {}, "Top chatters"), chattersTable(chatters, stats.messages)),
       el("div", { class: "card" }, el("h2", {}, "Most repeated messages"), repeatedTable(repeated, channel, from)),
     ),
-    el("div", { class: "card" }, el("h2", {}, "Latest messages"), latest.root),
+    el("div", { class: "card" }, el("h2", {}, "Latest messages", liveBadge()), latest.root),
   );
 
-  view.onMount = () =>
-    activityChart(chartBox, points, bucket, {
+  view.onMount = () => {
+    const stopChart = activityChart(chartBox, points, bucket, {
       onSelect: (p) => (location.hash = href("/search", { channel, from: p.t, to: p.t + bucket.ms })),
     });
+    const stopLive = latest.live();
+    return () => {
+      stopChart();
+      stopLive();
+    };
+  };
   return view;
 }
 
@@ -632,11 +679,13 @@ async function viewSearch(params) {
     { showChannel: !current.channel, emptyText: "No messages match." },
   );
   await results.ready;
+  // A window that ends in the past can't gain messages.
+  const isLive = !current.to;
 
   const view = el(
     "div",
     {},
-    el("h1", {}, "Search"),
+    el("h1", {}, "Search", isLive ? liveBadge() : null),
     el("p", { class: "subtitle" }, "Every word must appear; words match as prefixes (kek finds KEKW). Newest first."),
     form,
     chips.length ? el("div", { class: "filters" }, chips) : null,
@@ -644,6 +693,7 @@ async function viewSearch(params) {
   );
   view.onMount = () => {
     if (!current.q && !current.login) qInput.focus();
+    return isLive ? results.live() : null;
   };
   return view;
 }
@@ -678,7 +728,7 @@ async function viewUser(userId) {
   const messages = pagedMessages({ user_id: userId, limit: 100 }, { showChannel: user.channels.length > 1 });
   await messages.ready;
 
-  return el(
+  const view = el(
     "div",
     {},
     el("h1", {}, current.display_name),
@@ -719,8 +769,10 @@ async function viewUser(userId) {
         ),
       ),
     ),
-    el("div", { class: "card" }, el("h2", {}, "Messages"), messages.root),
+    el("div", { class: "card" }, el("h2", {}, "Messages", liveBadge()), messages.root),
   );
+  view.onMount = () => messages.live();
+  return view;
 }
 
 // ---------- router ----------
