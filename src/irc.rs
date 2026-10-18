@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const TWITCH_WS_URL: &str = "wss://irc-ws.chat.twitch.tv:443";
@@ -11,6 +12,14 @@ const TWITCH_WS_URL: &str = "wss://irc-ws.chat.twitch.tv:443";
 /// Twitch allows anonymous connections to JOIN 20 channels per 10 seconds.
 const JOIN_BATCH: usize = 20;
 const JOIN_INTERVAL: Duration = Duration::from_secs(11);
+
+/// We PING the server this often; Twitch answers with a PONG, so any healthy
+/// connection receives data at least once per interval, even in a quiet chat.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// A connection that has received nothing for this long is treated as dead.
+/// Without this, a silently dropped TCP connection (NAT timeout, network
+/// blip) would block the read forever and never reconnect.
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
@@ -250,8 +259,31 @@ async fn connect_and_read(
     *backoff = INITIAL_BACKOFF;
     let _ = tx.send(ChatEvent::Connected).await;
 
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await;
+    let mut last_received = Instant::now();
+
     loop {
-        let msg = match read.next().await {
+        let next = tokio::select! {
+            next = read.next() => next,
+            _ = keepalive.tick() => {
+                if last_received.elapsed() > KEEPALIVE_TIMEOUT {
+                    return Err(format!(
+                        "no data from server in {}s",
+                        last_received.elapsed().as_secs()
+                    ));
+                }
+                write
+                    .send(WsMessage::Text("PING :tmi.twitch.tv".into()))
+                    .await
+                    .map_err(|e| format!("keepalive failed: {e}"))?;
+                continue;
+            }
+        };
+        last_received = Instant::now();
+
+        let msg = match next {
             Some(Ok(m)) => m,
             Some(Err(e)) => return Err(format!("connection error: {e}")),
             None => return Err("connection closed by server".to_string()),

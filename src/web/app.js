@@ -253,7 +253,7 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
 }
 
 function liveBadge() {
-  return el("span", { class: "live", title: "New messages appear automatically" }, "Live");
+  return el("span", { class: "live", role: "img", "aria-label": "Live", title: "Live: new messages appear automatically" });
 }
 
 function statTile(label, value, sub) {
@@ -441,6 +441,28 @@ function dataTable(points, bucket) {
   );
 }
 
+const COLLAPSED_KEY = "collapsed-panels";
+const collapsedPanels = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) || "[]"));
+
+/**
+ * A card with a clickable heading that collapses its body. `key` identifies
+ * the panel across views and reloads so its open/closed state is remembered.
+ */
+function panel(key, title, ...children) {
+  const node = el(
+    "details",
+    { class: "card panel", open: !collapsedPanels.has(key) },
+    el("summary", {}, el("h2", {}, title)),
+    el("div", { class: "panel-body" }, children),
+  );
+  node.addEventListener("toggle", () => {
+    if (node.open) collapsedPanels.delete(key);
+    else collapsedPanels.add(key);
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedPanels]));
+  });
+  return node;
+}
+
 // ---------- views ----------
 
 async function viewOverview() {
@@ -544,14 +566,14 @@ async function viewChannel(channel, params) {
       statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each on average`),
       statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
     ),
-    el("div", { class: "card" }, el("h2", {}, `Messages per ${bucket.label}`), chartBox, dataTable(points, bucket)),
+    panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
     el(
       "div",
       { class: "grid-2" },
-      el("div", { class: "card" }, el("h2", {}, "Top chatters"), chattersTable(chatters, stats.messages)),
-      el("div", { class: "card" }, el("h2", {}, "Most repeated messages"), repeatedTable(repeated, channel, from)),
+      panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
+      panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
     ),
-    el("div", { class: "card" }, el("h2", {}, "Latest messages", liveBadge()), latest.root),
+    panel("latest-messages", ["Latest messages", liveBadge()], latest.root),
   );
 
   view.onMount = () => {
@@ -567,51 +589,56 @@ async function viewChannel(channel, params) {
   return view;
 }
 
+/**
+ * A ranked list: one fixed-height row per item, with a bar behind it scaled
+ * to `value` relative to the first (largest) item.
+ * `columns` labels the header: [label, sub, value].
+ */
+function rankList(columns, items) {
+  const max = items[0].value;
+  return el(
+    "ol",
+    { class: "rank" },
+    el("li", { class: "rank-head", "aria-hidden": "true" }, el("span"), ...columns.map((c) => el("span", {}, c))),
+    items.map((item, i) => {
+      const row = el(
+        "li",
+        {},
+        el("span", { class: "rank-n" }, i + 1),
+        el("a", { class: "rank-label", href: item.href, title: item.title }, item.label),
+        el("span", { class: "rank-sub" }, item.sub),
+        el("span", { class: "rank-value" }, fmtInt(item.value)),
+      );
+      row.style.setProperty("--w", `${Math.max((item.value / max) * 100, 1)}%`);
+      return row;
+    }),
+  );
+}
+
 function chattersTable(chatters, total) {
   if (!chatters.length) return el("p", { class: "muted" }, "No chatters.");
-  const max = chatters[0].messages;
-  return el(
-    "table",
-    {},
-    el("thead", {}, el("tr", {}, el("th", {}, "Chatter"), el("th", { class: "num" }, "Messages"), el("th", { class: "num" }, "Share"))),
-    el(
-      "tbody",
-      {},
-      chatters.map((c) => {
-        const bar = el("span", { class: "share-bar" });
-        bar.style.width = `${Math.max((c.messages / max) * 100, 1)}%`;
-        const link = c.user_id ? href(`/u/${encodeURIComponent(c.user_id)}`) : href("/search", { login: c.login });
-        return el(
-          "tr",
-          {},
-          el("td", {}, el("a", { href: link }, c.display_name), bar),
-          el("td", { class: "num" }, fmtInt(c.messages)),
-          el("td", { class: "num" }, `${((c.messages / total) * 100).toFixed(1)}%`),
-        );
-      }),
-    ),
+  return rankList(
+    ["Chatter", "Share", "Messages"],
+    chatters.map((c) => ({
+      label: c.display_name,
+      href: c.user_id ? href(`/u/${encodeURIComponent(c.user_id)}`) : href("/search", { login: c.login }),
+      sub: `${((c.messages / total) * 100).toFixed(1)}%`,
+      value: c.messages,
+    })),
   );
 }
 
 function repeatedTable(rows, channel, from) {
   if (!rows.length) return el("p", { class: "muted" }, "No message was sent more than once.");
-  return el(
-    "table",
-    {},
-    el("thead", {}, el("tr", {}, el("th", {}, "Message"), el("th", { class: "num" }, "Times"), el("th", { class: "num" }, "Chatters"))),
-    el(
-      "tbody",
-      {},
-      rows.map((r) =>
-        el(
-          "tr",
-          {},
-          el("td", { class: "text" }, el("a", { href: href("/search", { channel, q: r.text, from }) }, r.text)),
-          el("td", { class: "num" }, fmtInt(r.messages)),
-          el("td", { class: "num" }, fmtInt(r.chatters)),
-        ),
-      ),
-    ),
+  return rankList(
+    ["Message", "Chatters", "Times"],
+    rows.map((r) => ({
+      label: r.text,
+      title: r.text,
+      href: href("/search", { channel, q: r.text, from }),
+      sub: fmtInt(r.chatters),
+      value: r.messages,
+    })),
   );
 }
 
@@ -745,10 +772,9 @@ async function viewUser(userId) {
       statTile("First seen", dayFmt.format(new Date(Math.min(...user.channels.map((c) => c.first_at)))), fmtAgo(Math.min(...user.channels.map((c) => c.first_at)))),
       statTile("Last seen", dayFmt.format(new Date(current.last_at)), fmtAgo(current.last_at)),
     ),
-    el(
-      "div",
-      { class: "card" },
-      el("h2", {}, "Channels"),
+    panel(
+      "user-channels",
+      "Channels",
       el(
         "table",
         {},
@@ -769,7 +795,7 @@ async function viewUser(userId) {
         ),
       ),
     ),
-    el("div", { class: "card" }, el("h2", {}, "Messages", liveBadge()), messages.root),
+    panel("user-messages", ["Messages", liveBadge()], messages.root),
   );
   view.onMount = () => messages.live();
   return view;
