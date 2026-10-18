@@ -252,8 +252,8 @@ const TICK_INTERVALS = [MINUTE, 5 * MINUTE, 15 * MINUTE, 30 * MINUTE, HOUR, 3 * 
  * (one entry per bucket, zeros included). Clicking a point calls `onSelect`.
  */
 function activityChart(container, points, bucket, { onSelect } = {}) {
-  const height = 220;
-  const margin = { top: 12, right: 12, bottom: 26, left: 44 };
+  const height = 160;
+  const margin = { top: 8, right: 8, bottom: 22, left: 40 };
   const tooltip = el("div", { class: "tooltip", hidden: true });
   let svgNode = null;
 

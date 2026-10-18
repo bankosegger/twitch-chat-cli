@@ -20,6 +20,7 @@ use crate::store::Store;
 const INDEX_HTML: &str = include_str!("web/index.html");
 const APP_JS: &str = include_str!("web/app.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
+const FONT_WOFF2: &[u8] = include_bytes!("fonts/PlusJakartaSans-Variable.woff2");
 
 const MAX_IDLE_CONNECTIONS: usize = 8;
 const MAX_ACTIVITY_BUCKETS: i64 = 2000;
@@ -54,6 +55,10 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }))
         .route("/app.js", get(|| async { asset("text/javascript", APP_JS) }))
         .route("/style.css", get(|| async { asset("text/css", STYLE_CSS) }))
+        .route(
+            "/fonts/PlusJakartaSans-Variable.woff2",
+            get(|| async { asset("font/woff2", FONT_WOFF2) }),
+        )
         .nest("/api", api);
 
     let auth_enabled = password.is_some();
@@ -78,7 +83,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
 
 /// Assets are embedded in the binary; `no-cache` makes browsers revalidate so
 /// an upgraded binary's UI shows up without a hard refresh.
-fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+fn asset(content_type: &'static str, body: impl IntoResponse) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")],
         body,
