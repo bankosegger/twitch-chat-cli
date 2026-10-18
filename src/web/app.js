@@ -25,13 +25,13 @@ function svg(tag, attrs = {}) {
   return node;
 }
 
-async function api(path, params = {}) {
+async function api(path, params = {}, init = undefined) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value != null && value !== "") query.set(key, value);
   }
   const qs = query.toString();
-  const res = await fetch(`api${path}${qs ? `?${qs}` : ""}`);
+  const res = await fetch(`api${path}${qs ? `?${qs}` : ""}`, init);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const err = new Error(body.error || `${res.status} ${res.statusText}`);
@@ -39,6 +39,15 @@ async function api(path, params = {}) {
     throw err;
   }
   return res.json();
+}
+
+/** Sends a JSON request (POST, DELETE, ...) and returns the JSON response. */
+function apiSend(method, path, body = undefined) {
+  return api(path, {}, {
+    method,
+    headers: body === undefined ? {} : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
 }
 
 /** Builds a `#/path?query` link, dropping empty params. */
@@ -465,14 +474,126 @@ function panel(key, title, ...children) {
 
 // ---------- views ----------
 
+/** Accepts `name`, `#name` or a twitch.tv link; the server validates the rest. */
+function channelFromInput(value) {
+  return value
+    .trim()
+    .replace(/^(https?:\/\/)?(www\.|m\.)?twitch\.tv\//i, "")
+    .split(/[/?#]/, 1)[0] || value.trim();
+}
+
+/** Lists the channels the recorder is in, with a form to add and remove them. */
+function watchedPanel(initial) {
+  const list = el("div");
+  const error = el("p", { class: "error", hidden: true });
+  const input = el("input", { type: "text", name: "channel", placeholder: "Channel name or twitch.tv link", "aria-label": "Channel to record", autocomplete: "off", spellcheck: "false" });
+  const addButton = el("button", { type: "submit" }, "Add");
+
+  function showError(message) {
+    error.textContent = message;
+    error.hidden = !message;
+  }
+
+  async function change(request) {
+    showError("");
+    try {
+      draw(await request());
+      return true;
+    } catch (e) {
+      showError(e.message);
+      return false;
+    }
+  }
+
+  function draw(watched) {
+    if (!watched.length) {
+      list.replaceChildren(el("p", { class: "muted" }, "Not recording any channels yet. Add one above."));
+      return;
+    }
+    list.replaceChildren(
+      el(
+        "table",
+        {},
+        el("thead", {}, el("tr", {}, el("th", {}, "Channel"), el("th", {}, "Last message"), el("th", { class: "num" }, ""))),
+        el(
+          "tbody",
+          {},
+          watched.map((w) =>
+            el(
+              "tr",
+              {},
+              el("td", {}, w.last_message_at ? el("a", { href: href(`/c/${w.channel}`) }, w.channel) : w.channel),
+              el(
+                "td",
+                { class: "muted", title: w.last_message_at ? fmtDateTime(w.last_message_at) : null },
+                w.last_message_at ? fmtAgo(w.last_message_at) : "No messages yet",
+              ),
+              el(
+                "td",
+                { class: "num" },
+                w.pinned
+                  ? el("span", { class: "muted", title: "Set on the recorder's command line; remove it there." }, "Config")
+                  : el(
+                      "button",
+                      {
+                        type: "button",
+                        class: "small",
+                        "aria-label": `Stop recording ${w.channel}`,
+                        onclick: () => change(() => apiSend("DELETE", `/watched/${encodeURIComponent(w.channel)}`)),
+                      },
+                      "Remove",
+                    ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  const form = el(
+    "form",
+    {
+      class: "filters",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const channel = channelFromInput(input.value);
+        if (!channel) return;
+        addButton.disabled = true;
+        if (await change(() => apiSend("POST", "/watched", { channel }))) input.value = "";
+        addButton.disabled = false;
+        input.focus();
+      },
+    },
+    input,
+    addButton,
+  );
+
+  draw(initial);
+  return panel(
+    "watched",
+    "Recording",
+    form,
+    error,
+    list,
+    el("p", { class: "muted hint" }, "The recorder joins or leaves channels within a few seconds."),
+  );
+}
+
 async function viewOverview() {
-  const [channels, storage] = await Promise.all([api("/channels"), api("/storage")]);
+  const [channels, storage, watched] = await Promise.all([api("/channels"), api("/storage"), api("/watched")]);
   if (!channels.length) {
     return el(
       "div",
-      { class: "card empty" },
-      el("p", {}, "No messages recorded yet."),
-      el("p", {}, "Start the recorder with ", el("code", {}, "twitch-chat record --db chat.db <channel>"), "."),
+      {},
+      el("h1", {}, "Channels"),
+      el("p", { class: "subtitle" }, "No messages recorded yet."),
+      watchedPanel(watched),
+      el(
+        "div",
+        { class: "card empty" },
+        el("p", {}, "Add a channel above, and make sure the recorder is running: ", el("code", {}, "twitch-chat record --db chat.db"), "."),
+      ),
     );
   }
   const total = channels.reduce((sum, c) => sum + c.messages, 0);
@@ -482,6 +603,7 @@ async function viewOverview() {
     el("h1", {}, "Channels"),
     el("p", { class: "subtitle" }, `${fmtInt(total)} messages across ${channels.length} channel${channels.length === 1 ? "" : "s"}`),
     storageTiles(storage),
+    watchedPanel(watched),
     el(
       "div",
       { class: "card" },

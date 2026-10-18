@@ -46,9 +46,11 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Run headless and store every chat message in a SQLite database
+    ///
+    /// Channels can also be added and removed in the `serve` dashboard; the
+    /// recorder picks those changes up while running.
     Record {
-        /// Channel names to record, with or without '#'
-        #[arg(required = true)]
+        /// Channel names to always record, with or without '#'
         channels: Vec<String>,
 
         /// Path to the SQLite database (created if missing)
@@ -113,7 +115,9 @@ async fn run(
     credentials: Option<(String, String)>,
 ) -> io::Result<()> {
     let (tx, mut rx) = mpsc::channel::<ChatEvent>(1024);
-    tokio::spawn(irc::run(vec![channel.clone()], tx));
+    // A fixed list: dropping the sender tells the client it never changes.
+    let (_, channels) = tokio::sync::watch::channel(vec![channel.clone()]);
+    tokio::spawn(irc::run(channels, tx));
 
     let mut stream_rx = credentials.map(|(client_id, client_secret)| {
         let (stx, srx) = mpsc::unbounded_channel::<StreamStatus>();

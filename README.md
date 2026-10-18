@@ -30,6 +30,7 @@ cargo run --release -- <channel>
 twitch-chat record --db chat.db papaplatte xqc
 ```
 
+- Channels can also be added and removed in the web UI (see below). The recorder checks for changes every 5 seconds and joins or leaves channels without restarting. Channels given on the command line are always recorded and can only be removed there.
 - Messages are written in batches (every second, or every 500 messages).
 - Each message's Twitch id is stored with a unique constraint, so duplicates are skipped.
 - It reconnects automatically. Messages sent while disconnected are lost, because Twitch IRC has no replay.
@@ -71,7 +72,7 @@ twitch-chat serve --db chat.db                       # http://127.0.0.1:8080
 twitch-chat serve --db chat.db --bind 0.0.0.0:8080   # reachable from other machines
 ```
 
-- **Channels**: every recorded channel, its message count and when the last message arrived
+- **Channels**: every recorded channel, its message count and when the last message arrived. The **Recording** panel adds or removes channels for the recorder (it accepts a name, `#name` or a twitch.tv link).
 - **Channel dashboard**: messages over time, unique chatters, busiest period, top chatters and most repeated messages, for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment.
 - **Search**: full-text search across all messages, filterable by channel and user. Every word must appear, and words match as prefixes (`kek` finds `KEKW`).
 - **Context**: click a message's timestamp to see the conversation around it
@@ -83,7 +84,7 @@ It listens on localhost only by default. To expose it, set `TWITCH_CHAT_PASSWORD
 
 `docker-compose.yml` runs the recorder and the web UI as two containers built from the same image, sharing the database on a named volume (`chat-data`).
 
-1. Set the channels on the `record` service's `command:` line in `docker-compose.yml`.
+1. Optionally set channels to always record on the `record` service's `command:` line in `docker-compose.yml`. You can add more later in the web UI.
 2. Start everything:
 
    ```sh

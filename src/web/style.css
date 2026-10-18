@@ -148,9 +148,14 @@ input, select, button {
 }
 input:hover, select:hover { border-color: var(--border-strong); }
 input:focus, select:focus { outline: none; border-color: var(--text-secondary); }
-input[type="search"] { min-width: 220px; }
+input[type="search"], input[type="text"] { min-width: 240px; }
 button { cursor: pointer; font-weight: 600; }
 button:hover { background: var(--wash); border-color: var(--border-strong); }
+button:disabled { cursor: default; opacity: 0.5; }
+button.small { padding: 0 6px; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+button.small:hover { color: var(--text-primary); }
+.hint { margin: 8px 0 0; font-size: 12px; }
+.panel-body > .error { margin: 0 0 8px; }
 
 .chip {
   display: inline-flex;

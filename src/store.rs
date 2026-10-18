@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::irc::ChatMessage;
 
@@ -23,6 +23,15 @@ CREATE INDEX IF NOT EXISTS messages_channel_sent_at ON messages (channel, sent_a
 CREATE INDEX IF NOT EXISTS messages_user_id ON messages (user_id);
 CREATE INDEX IF NOT EXISTS messages_login ON messages (login);
 CREATE INDEX IF NOT EXISTS messages_sent_at ON messages (sent_at);
+
+-- Channels the recorder should be in. `pinned` rows come from the recorder's
+-- command line and are rewritten on every start; the rest are added and
+-- removed from the web dashboard.
+CREATE TABLE IF NOT EXISTS watched_channels (
+    channel  TEXT PRIMARY KEY,
+    pinned   INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL
+);
 ";
 
 /// Full-text index over `messages.text`, kept in sync by triggers.
@@ -92,6 +101,80 @@ impl Store {
         tx.commit()?;
         Ok(inserted)
     }
+
+    /// Makes `channels` the pinned (command-line) set: channels pinned by a
+    /// previous run but no longer listed are removed, and listed channels are
+    /// pinned even if they were added from the dashboard.
+    pub fn pin_channels(&mut self, channels: &[String]) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM watched_channels WHERE pinned = 1", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO watched_channels (channel, pinned, added_at) VALUES (?1, 1, ?2)
+                 ON CONFLICT (channel) DO UPDATE SET pinned = 1",
+            )?;
+            let now = now_millis();
+            for channel in channels {
+                stmt.execute(params![channel, now])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Every channel the recorder should be in, sorted by name.
+    pub fn watched_channels(&self) -> rusqlite::Result<Vec<String>> {
+        self.conn
+            .prepare_cached("SELECT channel FROM watched_channels ORDER BY channel")?
+            .query_map([], |r| r.get(0))?
+            .collect()
+    }
+}
+
+/// Adds a dashboard channel. Returns false if it was already watched.
+pub fn add_watched(conn: &Connection, channel: &str) -> rusqlite::Result<bool> {
+    let added = conn.execute(
+        "INSERT INTO watched_channels (channel, pinned, added_at) VALUES (?1, 0, ?2)
+         ON CONFLICT (channel) DO NOTHING",
+        params![channel, now_millis()],
+    )?;
+    Ok(added > 0)
+}
+
+pub enum RemoveWatched {
+    Removed,
+    /// Listed on the recorder's command line, so only removable there.
+    Pinned,
+    NotFound,
+}
+
+pub fn remove_watched(conn: &Connection, channel: &str) -> rusqlite::Result<RemoveWatched> {
+    let pinned: Option<bool> = conn
+        .query_row("SELECT pinned FROM watched_channels WHERE channel = ?1", [channel], |r| r.get(0))
+        .optional()?;
+    Ok(match pinned {
+        None => RemoveWatched::NotFound,
+        Some(true) => RemoveWatched::Pinned,
+        Some(false) => {
+            conn.execute("DELETE FROM watched_channels WHERE channel = ?1 AND pinned = 0", [channel])?;
+            RemoveWatched::Removed
+        }
+    })
+}
+
+/// Normalizes user input to a Twitch login: strips a leading '#', lowercases,
+/// and checks it is 1–25 letters, digits or underscores.
+pub fn normalize_channel(input: &str) -> Option<String> {
+    let name = input.trim().trim_start_matches('#').to_lowercase();
+    let valid = (1..=25).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    valid.then_some(name)
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Creates any missing tables and indexes. Safe to run concurrently from the
@@ -176,6 +259,43 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(hits, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn normalizes_channel_names() {
+        assert_eq!(normalize_channel(" #PapaPlatte ").as_deref(), Some("papaplatte"));
+        assert_eq!(normalize_channel("some_user_42").as_deref(), Some("some_user_42"));
+        assert_eq!(normalize_channel(""), None);
+        assert_eq!(normalize_channel("#"), None);
+        assert_eq!(normalize_channel("two words"), None);
+        assert_eq!(normalize_channel("twitch.tv/x"), None);
+        assert_eq!(normalize_channel(&"a".repeat(26)), None);
+    }
+
+    #[test]
+    fn dashboard_channels_can_be_added_and_removed() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        assert!(add_watched(&store.conn, "foo").unwrap());
+        assert!(!add_watched(&store.conn, "foo").unwrap(), "adding twice is a no-op");
+        assert_eq!(store.watched_channels().unwrap(), vec!["foo".to_string()]);
+        assert!(matches!(remove_watched(&store.conn, "foo").unwrap(), RemoveWatched::Removed));
+        assert!(matches!(remove_watched(&store.conn, "foo").unwrap(), RemoveWatched::NotFound));
+        assert!(store.watched_channels().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pinned_channels_follow_the_command_line() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        add_watched(&store.conn, "dash").unwrap();
+        add_watched(&store.conn, "both").unwrap();
+        store.pin_channels(&["cli".into(), "both".into()]).unwrap();
+        assert_eq!(store.watched_channels().unwrap(), ["both", "cli", "dash"]);
+        assert!(matches!(remove_watched(&store.conn, "cli").unwrap(), RemoveWatched::Pinned));
+        assert!(matches!(remove_watched(&store.conn, "both").unwrap(), RemoveWatched::Pinned));
+
+        // A restart without `cli` drops it; dashboard channels stay.
+        store.pin_channels(&["both".into()]).unwrap();
+        assert_eq!(store.watched_channels().unwrap(), ["both", "dash"]);
     }
 
     #[test]

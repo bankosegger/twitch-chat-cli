@@ -2,38 +2,51 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::irc::{self, ChatEvent, ChatMessage};
-use crate::store::Store;
+use crate::store::{self, Store};
 
 /// Flush to the database once this many messages are pending...
 const BATCH_SIZE: usize = 500;
 /// ...or at least this often.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const STATS_INTERVAL: Duration = Duration::from_secs(60);
+/// How often to check the database for channels added or removed in the
+/// web dashboard.
+const CHANNELS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Bounded so a stalled database applies backpressure instead of growing memory.
 const QUEUE_CAPACITY: usize = 10_000;
 
 /// Headless mode: joins `channels` and writes every chat message to SQLite
 /// until interrupted (Ctrl+C / SIGTERM).
-pub async fn run(channels: Vec<String>, db_path: &Path) -> io::Result<()> {
+pub async fn run(pinned: Vec<String>, db_path: &Path) -> io::Result<()> {
     let mut store = Store::open(db_path).map_err(io::Error::other)?;
-    eprintln!(
-        "recording {} channel(s) to {}: {}",
-        channels.len(),
-        db_path.display(),
-        channels.join(", ")
-    );
 
+    let mut valid = Vec::with_capacity(pinned.len());
+    for name in &pinned {
+        match store::normalize_channel(name) {
+            Some(channel) => valid.push(channel),
+            None => eprintln!("ignoring invalid channel name {name:?}"),
+        }
+    }
+    store.pin_channels(&valid).map_err(io::Error::other)?;
+
+    let initial = store.watched_channels().map_err(io::Error::other)?;
+    eprintln!("recording to {}", db_path.display());
+    log_channels(&initial);
+
+    let (channels_tx, channels_rx) = watch::channel(initial);
     let (tx, mut rx) = mpsc::channel::<ChatEvent>(QUEUE_CAPACITY);
-    tokio::spawn(irc::run(channels, tx));
+    tokio::spawn(irc::run(channels_rx, tx));
 
     let mut pending: Vec<ChatMessage> = Vec::with_capacity(BATCH_SIZE);
     let mut stored_since_stats = 0usize;
     let mut flush_tick = tokio::time::interval(FLUSH_INTERVAL);
     let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
     stats_tick.tick().await;
+    let mut channels_tick = tokio::time::interval(CHANNELS_POLL_INTERVAL);
+    channels_tick.tick().await;
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -61,6 +74,17 @@ pub async fn run(channels: Vec<String>, db_path: &Path) -> io::Result<()> {
                 eprintln!("stored {stored_since_stats} message(s) in the last {}s", STATS_INTERVAL.as_secs());
                 stored_since_stats = 0;
             }
+            _ = channels_tick.tick() => {
+                // Picks up channels added or removed in the web dashboard.
+                match tokio::task::block_in_place(|| store.watched_channels()) {
+                    Ok(wanted) if wanted != *channels_tx.borrow() => {
+                        log_changes(&channels_tx.borrow(), &wanted);
+                        channels_tx.send_replace(wanted);
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("failed to read watched channels: {e}"),
+                }
+            }
             _ = &mut shutdown => {
                 eprintln!("shutting down");
                 break;
@@ -70,6 +94,24 @@ pub async fn run(channels: Vec<String>, db_path: &Path) -> io::Result<()> {
 
     flush(&mut store, &mut pending);
     Ok(())
+}
+
+fn log_channels(channels: &[String]) {
+    if channels.is_empty() {
+        eprintln!("no channels to record yet; add some in the web dashboard or on the command line");
+    } else {
+        eprintln!("recording {} channel(s): {}", channels.len(), channels.join(", "));
+    }
+}
+
+fn log_changes(old: &[String], new: &[String]) {
+    for channel in new.iter().filter(|c| !old.contains(c)) {
+        eprintln!("joining {channel}");
+    }
+    for channel in old.iter().filter(|c| !new.contains(c)) {
+        eprintln!("leaving {channel}");
+    }
+    log_channels(new);
 }
 
 /// Writes and clears `pending`, returning how many rows were inserted. On a

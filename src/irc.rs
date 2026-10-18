@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -199,15 +199,14 @@ fn build_message(parsed: &IrcLine<'_>) -> ChatMessage {
     }
 }
 
-pub async fn run(channels: Vec<String>, tx: mpsc::Sender<ChatEvent>) {
+/// Stays connected to Twitch chat, in whichever channels `channels` currently
+/// holds: changes are applied to the live connection with JOIN/PART, and the
+/// latest list is re-joined after every reconnect.
+pub async fn run(mut channels: watch::Receiver<Vec<String>>, tx: mpsc::Sender<ChatEvent>) {
     let mut backoff = INITIAL_BACKOFF;
-    let channels: Vec<String> = channels
-        .iter()
-        .map(|c| c.trim_start_matches('#').to_lowercase())
-        .collect();
 
     loop {
-        if let Err(e) = connect_and_read(&channels, &tx, &mut backoff).await {
+        if let Err(e) = connect_and_read(&mut channels, &tx, &mut backoff).await {
             let _ = tx.send(ChatEvent::Disconnected(e)).await;
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -215,8 +214,28 @@ pub async fn run(channels: Vec<String>, tx: mpsc::Sender<ChatEvent>) {
     }
 }
 
+fn normalize(channels: &[String]) -> Vec<String> {
+    channels.iter().map(|c| c.trim_start_matches('#').to_lowercase()).collect()
+}
+
+/// Sends `COMMAND #a,#b,...` in batches of `JOIN_BATCH`.
+async fn send_channel_command<S>(write: &mut S, command: &str, channels: &[String]) -> Result<(), String>
+where
+    S: SinkExt<WsMessage> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    for batch in channels.chunks(JOIN_BATCH) {
+        let list = batch.iter().map(|c| format!("#{c}")).collect::<Vec<_>>().join(",");
+        write
+            .send(WsMessage::Text(format!("{command} {list}")))
+            .await
+            .map_err(|e| format!("{} failed: {e}", command.to_lowercase()))?;
+    }
+    Ok(())
+}
+
 async fn connect_and_read(
-    channels: &[String],
+    channels_rx: &mut watch::Receiver<Vec<String>>,
     tx: &mpsc::Sender<ChatEvent>,
     backoff: &mut Duration,
 ) -> Result<(), String> {
@@ -241,23 +260,19 @@ async fn connect_and_read(
         .send(WsMessage::Text(format!("NICK {nick}")))
         .await
         .map_err(|e| format!("handshake failed: {e}"))?;
-    for (i, batch) in channels.chunks(JOIN_BATCH).enumerate() {
+    let mut joined = normalize(&channels_rx.borrow_and_update());
+    for (i, batch) in joined.chunks(JOIN_BATCH).enumerate() {
         if i > 0 {
             tokio::time::sleep(JOIN_INTERVAL).await;
         }
-        let list = batch
-            .iter()
-            .map(|c| format!("#{c}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        write
-            .send(WsMessage::Text(format!("JOIN {list}")))
-            .await
-            .map_err(|e| format!("join failed: {e}"))?;
+        send_channel_command(&mut write, "JOIN", batch).await?;
     }
 
     *backoff = INITIAL_BACKOFF;
     let _ = tx.send(ChatEvent::Connected).await;
+
+    // Once the sender is gone the list can no longer change; stop polling it.
+    let mut list_closed = false;
 
     let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -278,6 +293,19 @@ async fn connect_and_read(
                     .send(WsMessage::Text("PING :tmi.twitch.tv".into()))
                     .await
                     .map_err(|e| format!("keepalive failed: {e}"))?;
+                continue;
+            }
+            changed = channels_rx.changed(), if !list_closed => {
+                if changed.is_err() {
+                    list_closed = true;
+                    continue;
+                }
+                let wanted = normalize(&channels_rx.borrow_and_update());
+                let added: Vec<String> = wanted.iter().filter(|c| !joined.contains(c)).cloned().collect();
+                let removed: Vec<String> = joined.iter().filter(|c| !wanted.contains(c)).cloned().collect();
+                send_channel_command(&mut write, "PART", &removed).await?;
+                send_channel_command(&mut write, "JOIN", &added).await?;
+                joined = wanted;
                 continue;
             }
         };

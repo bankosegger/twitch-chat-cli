@@ -8,14 +8,14 @@ use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use base64::Engine;
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
-use crate::store::Store;
+use crate::store::{self, RemoveWatched, Store};
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 const APP_JS: &str = include_str!("web/app.js");
@@ -49,6 +49,8 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
         .route("/messages/{id}/context", get(message_context))
         .route("/users", get(search_users))
         .route("/users/{user_id}", get(user))
+        .route("/watched", get(watched).post(add_watched))
+        .route("/watched/{channel}", delete(remove_watched))
         .with_state(db);
 
     let mut app = Router::new()
@@ -158,6 +160,23 @@ impl Db {
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
     }
+
+    /// Runs `f` on a fresh read-write connection. Only the watch-list
+    /// endpoints write, and rarely, so these are not pooled.
+    async fn write<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static,
+    {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.busy_timeout(Duration::from_secs(5))?;
+            f(&conn)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+    }
 }
 
 enum ApiError {
@@ -260,6 +279,68 @@ async fn channels(State(db): State<Arc<Db>>) -> ApiResult<Vec<ChannelSummary>> {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Serialize)]
+struct WatchedChannel {
+    channel: String,
+    /// Set on the recorder's command line; can't be removed from the dashboard.
+    pinned: bool,
+    added_at: i64,
+    last_message_at: Option<i64>,
+}
+
+fn list_watched(conn: &Connection) -> Result<Vec<WatchedChannel>, ApiError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT channel, pinned, added_at,
+                (SELECT max(sent_at) FROM messages m WHERE m.channel = w.channel)
+         FROM watched_channels w ORDER BY channel",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(WatchedChannel {
+            channel: r.get(0)?,
+            pinned: r.get(1)?,
+            added_at: r.get(2)?,
+            last_message_at: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+async fn watched(State(db): State<Arc<Db>>) -> ApiResult<Vec<WatchedChannel>> {
+    db.query(list_watched).await.map(Json)
+}
+
+#[derive(Deserialize)]
+struct AddWatched {
+    channel: String,
+}
+
+/// Takes a JSON body, so browsers won't send it cross-site without a CORS
+/// preflight (which this server never approves).
+async fn add_watched(State(db): State<Arc<Db>>, Json(body): Json<AddWatched>) -> ApiResult<Vec<WatchedChannel>> {
+    let channel = store::normalize_channel(&body.channel).ok_or_else(|| {
+        ApiError::BadRequest("Channel names are 1–25 letters, digits or underscores.".to_string())
+    })?;
+    db.write(move |conn| {
+        store::add_watched(conn, &channel)?;
+        list_watched(conn)
+    })
+    .await
+    .map(Json)
+}
+
+async fn remove_watched(State(db): State<Arc<Db>>, UrlPath(channel): UrlPath<String>) -> ApiResult<Vec<WatchedChannel>> {
+    let channel = store::normalize_channel(&channel).ok_or(ApiError::NotFound)?;
+    db.write(move |conn| match store::remove_watched(conn, &channel)? {
+        RemoveWatched::Removed => list_watched(conn),
+        RemoveWatched::NotFound => Err(ApiError::NotFound),
+        RemoveWatched::Pinned => Err(ApiError::BadRequest(format!(
+            "{channel} is set on the recorder's command line; remove it there."
+        ))),
     })
     .await
     .map(Json)

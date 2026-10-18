@@ -3,7 +3,9 @@
 #   docker compose up -d --build
 #   open http://localhost:8080
 #
-# Change the channels on the `record` service's command line.
+# Add channels in the web UI's "Recording" panel, or list channels to always
+# record on the `record` service's command line (those can't be removed in
+# the UI).
 services:
   record:
     build: .
