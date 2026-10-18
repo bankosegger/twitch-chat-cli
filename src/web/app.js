@@ -63,6 +63,17 @@ const fmtInt = (n) => numberFmt.format(n);
 const fmtCompact = (n) => (Math.abs(n) >= 1000 ? compactFmt.format(n) : numberFmt.format(n));
 const fmtDateTime = (ms) => dateTimeFmt.format(new Date(ms));
 
+function fmtBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit === 0 || value >= 100 ? 0 : 1)} ${units[unit]}`;
+}
+
 function fmtMessageTime(ms) {
   const d = new Date(ms);
   const sameDay = d.toDateString() === new Date().toDateString();
@@ -392,7 +403,7 @@ function dataTable(points, bucket) {
 // ---------- views ----------
 
 async function viewOverview() {
-  const channels = await api("/channels");
+  const [channels, storage] = await Promise.all([api("/channels"), api("/storage")]);
   if (!channels.length) {
     return el(
       "div",
@@ -407,6 +418,7 @@ async function viewOverview() {
     {},
     el("h1", {}, "Channels"),
     el("p", { class: "subtitle" }, `${fmtInt(total)} messages across ${channels.length} channel${channels.length === 1 ? "" : "s"}`),
+    storageTiles(storage),
     el(
       "div",
       { class: "card" },
@@ -429,6 +441,21 @@ async function viewOverview() {
           ),
         ),
       ),
+    ),
+  );
+}
+
+function storageTiles(storage) {
+  const perMessage = storage.messages ? storage.bytes / storage.messages : 0;
+  return el(
+    "div",
+    { class: "tiles" },
+    statTile("Database size", fmtBytes(storage.bytes), perMessage ? `about ${fmtBytes(perMessage)} per message` : null),
+    statTile("Messages", fmtCompact(storage.messages), `${fmtInt(storage.messages)} total`),
+    statTile(
+      "Last 24 hours",
+      fmtCompact(storage.messages_24h),
+      perMessage ? `about ${fmtBytes(storage.messages_24h * perMessage)} per day at this rate` : null,
     ),
   );
 }

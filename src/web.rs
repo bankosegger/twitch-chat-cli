@@ -2,7 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -39,6 +39,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
 
     let api = Router::new()
         .route("/channels", get(channels))
+        .route("/storage", get(storage))
         .route("/stats", get(stats))
         .route("/activity", get(activity))
         .route("/top-chatters", get(top_chatters))
@@ -254,6 +255,43 @@ async fn channels(State(db): State<Arc<Db>>) -> ApiResult<Vec<ChannelSummary>> {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Serialize)]
+struct Storage {
+    /// On-disk size of the database, including its `-wal` and `-shm` files.
+    bytes: u64,
+    messages: i64,
+    /// Messages received in the last 24 hours, to estimate growth.
+    messages_24h: i64,
+}
+
+async fn storage(State(db): State<Arc<Db>>) -> ApiResult<Storage> {
+    let db_path = db.path.clone();
+    db.query(move |conn| {
+        let bytes = ["", "-wal", "-shm"]
+            .iter()
+            .filter_map(|suffix| {
+                let mut path = db_path.clone().into_os_string();
+                path.push(suffix);
+                std::fs::metadata(path).ok()
+            })
+            .map(|m| m.len())
+            .sum();
+        let day_ago = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+            - 24 * 60 * 60 * 1000;
+        let (messages, messages_24h) = conn.query_row(
+            "SELECT count(*), (SELECT count(*) FROM messages WHERE sent_at >= ?) FROM messages",
+            [day_ago],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(Storage { bytes, messages, messages_24h })
     })
     .await
     .map(Json)
