@@ -1,7 +1,7 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
 use crate::helix::{StreamInfo, StreamStatus};
-use crate::irc::{ChatMessage, UserNotice};
+use crate::irc::{ChatMessage, ModAction, ModKind, UserNotice};
 
 const MAX_MESSAGES: usize = 500;
 
@@ -11,6 +11,8 @@ pub enum ChatItem {
     Message(ChatMessage),
     /// A sub, raid, announcement, ...
     Event(UserNotice),
+    /// A ban, timeout or /clear.
+    Moderation(ModAction),
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +50,8 @@ pub struct App {
     pub mods_seen: BTreeSet<String>,
     /// New, renewed and gifted subs since the client started.
     pub subs_seen: usize,
+    /// Ids of messages removed by moderators, shown struck through.
+    pub deleted: HashSet<String>,
 }
 
 impl App {
@@ -73,6 +77,7 @@ impl App {
             },
             mods_seen: BTreeSet::new(),
             subs_seen: 0,
+            deleted: HashSet::new(),
         }
     }
 
@@ -114,7 +119,32 @@ impl App {
             ChatItem::Event(e) => {
                 contains(&e.display_name) || contains(&e.system_text) || e.text.as_deref().is_some_and(contains)
             }
+            ChatItem::Moderation(a) => a.target_login.as_deref().is_some_and(contains),
         }
+    }
+
+    pub fn is_deleted(&self, msg: &ChatMessage) -> bool {
+        msg.id.as_ref().is_some_and(|id| self.deleted.contains(id))
+    }
+
+    /// A deleted message is struck through; a ban or timeout strikes through
+    /// all of the user's messages still on screen, as Twitch's chat does.
+    pub fn push_moderation(&mut self, action: ModAction) {
+        match action.kind {
+            ModKind::Delete => {
+                self.deleted.extend(action.target_msg_id);
+                return;
+            }
+            ModKind::Ban | ModKind::Timeout(_) => {
+                let ids = self.messages.iter().filter_map(|item| match item {
+                    ChatItem::Message(m) if m.user_id.is_some() && m.user_id == action.target_user_id => m.id.clone(),
+                    _ => None,
+                });
+                self.deleted.extend(ids.collect::<Vec<_>>());
+            }
+            ModKind::Clear => {}
+        }
+        self.push_item(ChatItem::Moderation(action));
     }
 
     pub fn start_filter_edit(&mut self) {
@@ -169,8 +199,10 @@ impl App {
 
     fn push_item(&mut self, item: ChatItem) {
         self.messages.push_back(item);
-        if self.messages.len() > MAX_MESSAGES {
-            self.messages.pop_front();
+        if self.messages.len() > MAX_MESSAGES
+            && let Some(ChatItem::Message(ChatMessage { id: Some(id), .. })) = self.messages.pop_front()
+        {
+            self.deleted.remove(&id);
         }
     }
 

@@ -36,10 +36,80 @@ pub struct ChatMessage {
     /// Unprocessed `badges` tag, e.g. `moderator/1,subscriber/12`.
     pub badges_raw: String,
     pub text: String,
+    /// Bits cheered with this message.
+    pub bits: Option<i64>,
+    /// Unprocessed `emotes` tag: `emote_id:start-end,start-end/...`, with
+    /// inclusive positions counted in characters (code points) of `text`.
+    pub emotes: String,
     /// Unix milliseconds, from `tmi-sent-ts` (falls back to `received_at`).
     pub sent_at: i64,
     /// Unix milliseconds when this client parsed the message.
     pub received_at: i64,
+}
+
+impl ChatMessage {
+    /// A cheer, as an event alongside subs and raids.
+    pub fn cheer(&self) -> Option<UserNotice> {
+        let bits = self.bits?;
+        Some(UserNotice {
+            id: self.id.clone(),
+            channel: self.channel.clone(),
+            room_id: self.room_id.clone(),
+            user_id: self.user_id.clone(),
+            login: self.login.clone(),
+            display_name: self.display_name.clone(),
+            color: self.color,
+            kind: "cheer".to_string(),
+            tier: None,
+            months: None,
+            count: Some(bits),
+            recipient_login: None,
+            recipient_display_name: None,
+            bulk_gift: false,
+            system_text: format!("{} cheered {bits} bit{}!", self.display_name, if bits == 1 { "" } else { "s" }),
+            text: Some(self.text.clone()),
+            sent_at: self.sent_at,
+            received_at: self.received_at,
+        })
+    }
+}
+
+/// A moderator removing chat: `CLEARCHAT` (ban, timeout, /clear) or
+/// `CLEARMSG` (a single deleted message).
+#[derive(Debug, Clone)]
+pub struct ModAction {
+    pub channel: String,
+    pub room_id: Option<String>,
+    pub kind: ModKind,
+    /// The banned or timed-out user, or the author of a deleted message.
+    pub target_user_id: Option<String>,
+    pub target_login: Option<String>,
+    /// For a deleted message: its id and text.
+    pub target_msg_id: Option<String>,
+    pub text: Option<String>,
+    pub sent_at: i64,
+    pub received_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModKind {
+    Ban,
+    /// Seconds.
+    Timeout(i64),
+    /// `/clear`: the whole chat was cleared.
+    Clear,
+    Delete,
+}
+
+impl ModKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModKind::Ban => "ban",
+            ModKind::Timeout(_) => "timeout",
+            ModKind::Clear => "clear",
+            ModKind::Delete => "delete",
+        }
+    }
 }
 
 /// A `USERNOTICE`: a sub, resub, gifted sub, raid, announcement, etc.
@@ -88,6 +158,7 @@ pub enum ChatEvent {
     Disconnected(String),
     Message(ChatMessage),
     UserNotice(UserNotice),
+    Moderation(ModAction),
     SystemNotice(String),
 }
 
@@ -231,6 +302,43 @@ fn build_message(parsed: &IrcLine<'_>) -> ChatMessage {
         color: tag("color").and_then(|c| parse_color(&c)),
         badges: badge_labels(&badges_raw),
         badges_raw,
+        text,
+        bits: tag("bits").and_then(|b| b.parse().ok()).filter(|&b: &i64| b > 0),
+        emotes: tag("emotes").unwrap_or_default(),
+        sent_at: tag("tmi-sent-ts")
+            .and_then(|ts| ts.parse().ok())
+            .unwrap_or(received_at),
+        received_at,
+    }
+}
+
+fn build_mod_action(parsed: &IrcLine<'_>) -> ModAction {
+    let tag = |key: &str| parsed.tags.get(key).cloned().filter(|s| !s.is_empty());
+    let received_at = now_millis();
+    // The second parameter is the target login (CLEARCHAT) or the deleted
+    // message's text (CLEARMSG).
+    let trailing = parsed.params.get(1).map(|t| t.to_string());
+    let (kind, target_login, text) = if parsed.command == "CLEARMSG" {
+        (ModKind::Delete, tag("login"), trailing)
+    } else {
+        let kind = match (&trailing, tag("ban-duration").and_then(|d| d.parse().ok())) {
+            (None, _) => ModKind::Clear,
+            (Some(_), Some(seconds)) => ModKind::Timeout(seconds),
+            (Some(_), None) => ModKind::Ban,
+        };
+        (kind, trailing.map(|l| l.to_lowercase()), None)
+    };
+    ModAction {
+        channel: parsed
+            .params
+            .first()
+            .map(|c| c.trim_start_matches('#').to_lowercase())
+            .unwrap_or_default(),
+        room_id: tag("room-id"),
+        kind,
+        target_user_id: tag("target-user-id"),
+        target_login,
+        target_msg_id: tag("target-msg-id"),
         text,
         sent_at: tag("tmi-sent-ts")
             .and_then(|ts| ts.parse().ok())
@@ -427,6 +535,9 @@ async fn connect_and_read(
                 "PRIVMSG" => {
                     let _ = tx.send(ChatEvent::Message(build_message(&parsed))).await;
                 }
+                "CLEARCHAT" | "CLEARMSG" => {
+                    let _ = tx.send(ChatEvent::Moderation(build_mod_action(&parsed))).await;
+                }
                 "USERNOTICE" => {
                     if let Some(notice) = build_user_notice(&parsed) {
                         let _ = tx.send(ChatEvent::UserNotice(notice)).await;
@@ -498,6 +609,56 @@ mod tests {
         assert_eq!(gift.recipient_display_name.as_deref(), Some("Lucky"));
         assert_eq!(gift.months, Some(3));
         assert!(gift.is_sub());
+    }
+
+    fn mod_action(line: &str) -> ModAction {
+        build_mod_action(&parse_line(line).unwrap())
+    }
+
+    #[test]
+    fn parses_moderation() {
+        let timeout = mod_action(
+            "@ban-duration=600;room-id=1;target-user-id=2;tmi-sent-ts=1700000000000 :tmi.twitch.tv CLEARCHAT #chan :Rowdy",
+        );
+        assert_eq!(timeout.kind, ModKind::Timeout(600));
+        assert_eq!(timeout.target_login.as_deref(), Some("rowdy"));
+        assert_eq!(timeout.target_user_id.as_deref(), Some("2"));
+        assert_eq!(timeout.sent_at, 1_700_000_000_000);
+
+        let ban = mod_action("@room-id=1;target-user-id=2 :tmi.twitch.tv CLEARCHAT #chan :rowdy");
+        assert_eq!(ban.kind, ModKind::Ban);
+
+        let clear = mod_action("@room-id=1 :tmi.twitch.tv CLEARCHAT #chan");
+        assert_eq!(clear.kind, ModKind::Clear);
+        assert_eq!(clear.target_login, None);
+
+        let delete = mod_action(
+            "@login=rowdy;room-id=;target-msg-id=abc :tmi.twitch.tv CLEARMSG #chan :something rude",
+        );
+        assert_eq!(delete.kind, ModKind::Delete);
+        assert_eq!(delete.target_msg_id.as_deref(), Some("abc"));
+        assert_eq!(delete.target_login.as_deref(), Some("rowdy"));
+        assert_eq!(delete.text.as_deref(), Some("something rude"));
+    }
+
+    #[test]
+    fn parses_bits_and_emotes() {
+        let msg = build_message(
+            &parse_line(
+                "@bits=100;display-name=Fan;emotes=25:0-4;id=x :fan!fan@fan.tmi.twitch.tv PRIVMSG #chan :Kappa Cheer100",
+            )
+            .unwrap(),
+        );
+        assert_eq!(msg.bits, Some(100));
+        assert_eq!(msg.emotes, "25:0-4");
+        let cheer = msg.cheer().unwrap();
+        assert_eq!(cheer.kind, "cheer");
+        assert_eq!(cheer.count, Some(100));
+        assert_eq!(cheer.system_text, "Fan cheered 100 bits!");
+
+        let plain = build_message(&parse_line(":a!a@a.tmi.twitch.tv PRIVMSG #chan :hi").unwrap());
+        assert_eq!(plain.bits, None);
+        assert!(plain.cheer().is_none());
     }
 
     #[test]

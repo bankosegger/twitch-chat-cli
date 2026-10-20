@@ -351,6 +351,34 @@ details.data-table .scroll { max-height: 280px; overflow: auto; margin-top: 6px;
 .event-icon { color: var(--event); margin-right: 4px; }
 .event-text { color: var(--text-secondary); }
 .event-message { display: block; padding-left: 16px; color: var(--text-primary); }
+.msg.event-cheer { --event: #fbbf24; }
+
+/* Moderation */
+.msg.mod { color: var(--text-muted); font-style: italic; }
+.msg.mod .name { font-style: normal; color: var(--text-secondary); }
+.mod-icon { color: var(--danger); margin-right: 4px; font-style: normal; }
+.msg.deleted .text { color: var(--text-muted); text-decoration: line-through; }
+.deleted-tag {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+/* Bits, emotes and badge images; all sized to the 18px chat line. */
+.bits { color: #fbbf24; font-weight: 700; margin-right: 4px; }
+.emote { height: 24px; margin: -3px 0; vertical-align: middle; }
+.badge-img { width: 18px; height: 18px; margin-right: 3px; vertical-align: top; }
+
+/* Profile heading and live status */
+.with-avatar { display: flex; align-items: center; gap: 10px; }
+.avatar { width: 40px; height: 40px; border-radius: 50%; }
+.chip.type { font-size: 11px; font-weight: 500; text-transform: capitalize; }
+.live-line { margin-left: 8px; }
+.live-dot { color: #ff4d4d; font-weight: 700; }
+.live-title { display: block; color: var(--text-primary); margin-top: 2px; }
 
 .empty { padding: 24px; text-align: center; color: var(--text-secondary); }
 .empty code { background: var(--wash); padding: 1px 5px; border-radius: var(--radius); }

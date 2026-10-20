@@ -2,7 +2,20 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::irc::{ChatMessage, UserNotice};
+use crate::irc::{ChatMessage, ModAction, ModKind, UserNotice};
+
+/// One viewer-count reading of a live channel.
+#[derive(Debug, Clone)]
+pub struct StreamSample {
+    pub channel: String,
+    pub stream_id: String,
+    /// Unix milliseconds.
+    pub sampled_at: i64,
+    pub started_at: i64,
+    pub viewer_count: i64,
+    pub title: String,
+    pub game_name: String,
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
@@ -50,6 +63,36 @@ CREATE INDEX IF NOT EXISTS events_channel_sent_at ON events (channel, sent_at);
 CREATE INDEX IF NOT EXISTS events_sent_at ON events (sent_at);
 CREATE INDEX IF NOT EXISTS events_user_id ON events (user_id);
 
+-- Bans, timeouts, /clear and deleted messages (IRC CLEARCHAT / CLEARMSG).
+CREATE TABLE IF NOT EXISTS moderation (
+    id             INTEGER PRIMARY KEY,
+    channel        TEXT NOT NULL,
+    room_id        TEXT,
+    kind           TEXT NOT NULL, -- 'ban', 'timeout', 'clear', 'delete'
+    duration       INTEGER,       -- seconds, for timeouts
+    target_user_id TEXT,
+    target_login   TEXT,
+    target_msg_id  TEXT,
+    text           TEXT,          -- the deleted message, for 'delete'
+    sent_at        INTEGER NOT NULL,
+    received_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS moderation_channel_sent_at ON moderation (channel, sent_at);
+CREATE INDEX IF NOT EXISTS moderation_target_user_id ON moderation (target_user_id);
+
+-- Viewer counts, sampled about once a minute while a channel is live.
+CREATE TABLE IF NOT EXISTS stream_samples (
+    id           INTEGER PRIMARY KEY,
+    channel      TEXT NOT NULL,
+    stream_id    TEXT NOT NULL,
+    sampled_at   INTEGER NOT NULL,
+    started_at   INTEGER NOT NULL,
+    viewer_count INTEGER NOT NULL,
+    title        TEXT NOT NULL,
+    game_name    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS stream_samples_channel_sampled_at ON stream_samples (channel, sampled_at);
+
 -- Channels the recorder should be in. `pinned` rows come from the recorder's
 -- command line and are rewritten on every start; the rest are added and
 -- removed from the web dashboard.
@@ -59,6 +102,20 @@ CREATE TABLE IF NOT EXISTS watched_channels (
     added_at INTEGER NOT NULL
 );
 ";
+
+/// Columns added to `messages` after it was first released; added to older
+/// databases on open.
+const MESSAGE_COLUMNS_ADDED: [(&str, &str); 3] = [
+    ("bits", "INTEGER"),
+    // Raw `emotes` tag.
+    ("emotes", "TEXT"),
+    // When a moderator deleted it, or timed out or banned its author.
+    ("deleted_at", "INTEGER"),
+];
+
+/// A ban or timeout hides the user's messages from this long before it, the
+/// way Twitch's chat clears whatever of theirs is still on screen.
+const BAN_REMOVES_MS: i64 = 10 * 60 * 1000;
 
 /// Full-text index over `messages.text`, kept in sync by triggers.
 const FTS_SCHEMA: &str = "
@@ -105,8 +162,8 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO messages
                     (msg_id, channel, room_id, user_id, login, display_name,
-                     color, badges, text, sent_at, received_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     color, badges, text, bits, emotes, sent_at, received_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for msg in messages {
                 inserted += stmt.execute(params![
@@ -119,6 +176,8 @@ impl Store {
                     msg.color.map(hex_color),
                     msg.badges_raw,
                     msg.text,
+                    msg.bits,
+                    Some(&msg.emotes).filter(|e| !e.is_empty()),
                     msg.sent_at,
                     msg.received_at,
                 ])?;
@@ -126,6 +185,80 @@ impl Store {
         }
         tx.commit()?;
         Ok(inserted)
+    }
+
+    /// Records bans, timeouts and deletions, and marks the affected messages
+    /// as deleted. Call after inserting the messages received before them.
+    pub fn insert_moderation(&mut self, actions: &[ModAction]) -> rusqlite::Result<usize> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO moderation
+                    (channel, room_id, kind, duration, target_user_id, target_login,
+                     target_msg_id, text, sent_at, received_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            let mut delete_one = tx.prepare_cached(
+                "UPDATE messages SET deleted_at = ?2 WHERE msg_id = ?1 AND deleted_at IS NULL",
+            )?;
+            let mut delete_recent = tx.prepare_cached(
+                "UPDATE messages SET deleted_at = ?4
+                 WHERE user_id = ?1 AND channel = ?2 AND sent_at >= ?3 AND sent_at <= ?4 AND deleted_at IS NULL",
+            )?;
+            for a in actions {
+                let duration = match a.kind {
+                    ModKind::Timeout(seconds) => Some(seconds),
+                    _ => None,
+                };
+                insert.execute(params![
+                    a.channel,
+                    a.room_id,
+                    a.kind.as_str(),
+                    duration,
+                    a.target_user_id,
+                    a.target_login,
+                    a.target_msg_id,
+                    a.text,
+                    a.sent_at,
+                    a.received_at,
+                ])?;
+                match (a.kind, &a.target_msg_id, &a.target_user_id) {
+                    (ModKind::Delete, Some(msg_id), _) => {
+                        delete_one.execute(params![msg_id, a.sent_at])?;
+                    }
+                    (ModKind::Ban | ModKind::Timeout(_), _, Some(user_id)) => {
+                        delete_recent.execute(params![user_id, a.channel, a.sent_at - BAN_REMOVES_MS, a.sent_at])?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(actions.len())
+    }
+
+    pub fn insert_samples(&mut self, samples: &[StreamSample]) -> rusqlite::Result<usize> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO stream_samples
+                    (channel, stream_id, sampled_at, started_at, viewer_count, title, game_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for s in samples {
+                stmt.execute(params![
+                    s.channel,
+                    s.stream_id,
+                    s.sampled_at,
+                    s.started_at,
+                    s.viewer_count,
+                    s.title,
+                    s.game_name
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(samples.len())
     }
 
     /// Like `insert_batch`, for subs, raids and other events.
@@ -236,7 +369,8 @@ pub struct Deleted {
 /// never locked out for longer than its busy timeout.
 const DELETE_CHUNK: usize = 5000;
 
-/// Deletes every message and event recorded in `channel`.
+/// Deletes everything recorded in `channel`: messages, events, moderation
+/// actions and viewer counts.
 pub fn delete_channel(conn: &Connection, channel: &str) -> rusqlite::Result<Deleted> {
     let delete_all = |table: &str| -> rusqlite::Result<usize> {
         let sql = format!(
@@ -251,10 +385,13 @@ pub fn delete_channel(conn: &Connection, channel: &str) -> rusqlite::Result<Dele
             }
         }
     };
-    Ok(Deleted {
+    let deleted = Deleted {
         messages: delete_all("messages")?,
         events: delete_all("events")?,
-    })
+    };
+    delete_all("moderation")?;
+    delete_all("stream_samples")?;
+    Ok(deleted)
 }
 
 /// Normalizes user input to a Twitch login: strips a leading '#', lowercases,
@@ -270,7 +407,7 @@ fn hex_color((r, g, b): (u8, u8, u8)) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
-fn now_millis() -> i64 {
+pub fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -283,6 +420,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
         conn.execute_batch(SCHEMA)?;
+        let existing: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('messages')")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for (name, decl) in MESSAGE_COLUMNS_ADDED {
+            if !existing.iter().any(|c| c == name) {
+                conn.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {name} {decl}"))?;
+            }
+        }
         let has_fts: bool = conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'messages_fts')",
             [],
@@ -313,6 +459,8 @@ mod tests {
             badges: vec!["SUB".into()],
             badges_raw: "subscriber/12".into(),
             text: text.into(),
+            bits: None,
+            emotes: String::new(),
             sent_at: 1_700_000_000_000,
             received_at: 1_700_000_000_050,
         }
@@ -386,6 +534,63 @@ mod tests {
         };
         assert_eq!(store.insert_events(&[event.clone(), event.clone()]).unwrap(), 1);
         assert_eq!(store.insert_events(&[event]).unwrap(), 0);
+    }
+
+    fn deleted_ids(store: &Store) -> Vec<String> {
+        store
+            .conn
+            .prepare("SELECT msg_id FROM messages WHERE deleted_at IS NOT NULL ORDER BY msg_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn action(kind: ModKind, msg_id: Option<&str>, sent_at: i64) -> ModAction {
+        ModAction {
+            channel: "somechannel".into(),
+            room_id: Some("1".into()),
+            kind,
+            target_user_id: Some("2".into()),
+            target_login: Some("someone".into()),
+            target_msg_id: msg_id.map(String::from),
+            text: None,
+            sent_at,
+            received_at: sent_at,
+        }
+    }
+
+    #[test]
+    fn moderation_marks_messages_deleted() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let t = 1_700_000_000_000;
+        let mut old = message(Some("old"), "from long ago");
+        old.sent_at = t - BAN_REMOVES_MS - 1;
+        let mut recent = message(Some("recent"), "just now");
+        recent.sent_at = t - 1000;
+        let mut other_user = message(Some("other"), "bystander");
+        other_user.user_id = Some("3".into());
+        other_user.sent_at = t - 1000;
+        let mut single = message(Some("single"), "rude");
+        single.sent_at = t - BAN_REMOVES_MS * 2;
+        store.insert_batch(&[old, recent, other_user, single]).unwrap();
+
+        store.insert_moderation(&[action(ModKind::Delete, Some("single"), t)]).unwrap();
+        assert_eq!(deleted_ids(&store), ["single"]);
+
+        store.insert_moderation(&[action(ModKind::Timeout(600), None, t)]).unwrap();
+        assert_eq!(deleted_ids(&store), ["recent", "single"], "only their recent messages");
+
+        let kinds: Vec<(String, Option<i64>)> = store
+            .conn
+            .prepare("SELECT kind, duration FROM moderation ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kinds, [("delete".to_string(), None), ("timeout".to_string(), Some(600))]);
     }
 
     #[test]
@@ -469,6 +674,11 @@ mod tests {
             .query_row("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'hello'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+        let bits: Option<i64> = store
+            .conn
+            .query_row("SELECT bits FROM messages WHERE msg_id = 'old'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bits, None, "new columns are added to old databases");
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

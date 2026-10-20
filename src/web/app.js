@@ -179,31 +179,139 @@ function nameColor(color, login) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+// ---------- Twitch images ----------
+
+/** Badge images per channel (`"subscriber/12"` → `{ url, title }`), filled by `loadBadges`. */
+const badgeImages = new Map();
+const badgeRequests = new Map();
+
+/** Fetches badge images for these channels, once each. Empty without API credentials. */
+function loadBadges(channels) {
+  return Promise.all(
+    [...new Set(channels)].map((channel) => {
+      if (!badgeRequests.has(channel)) {
+        badgeRequests.set(
+          channel,
+          api("/badges", { channel })
+            .then((map) => badgeImages.set(channel, map))
+            .catch(() => badgeImages.set(channel, {})),
+        );
+      }
+      return badgeRequests.get(channel);
+    }),
+  );
+}
+
+/** Real badge images when known, else the text badges. */
+function badgeNodes(raw, channel) {
+  const images = badgeImages.get(channel);
+  if (images && Object.keys(images).length) {
+    return (raw ? raw.split(",") : [])
+      .map((key) => images[key])
+      .filter(Boolean)
+      .map((b) => el("img", { class: "badge-img", src: b.url, alt: b.title, title: b.title, width: 18, height: 18, loading: "lazy" }));
+  }
+  return badgesFor(raw).map((b) => el("span", { class: `badge badge-${b.key}`, title: b.title, "aria-label": b.title }, b.icon));
+}
+
+const emoteUrl = (id, scale) => `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(id)}/default/dark/${scale}`;
+
+/**
+ * Message text with Twitch emotes as images. `emotes` is the raw tag
+ * (`25:0-4,6-10/1902:12-16`); positions count characters, not UTF-16 units.
+ */
+function messageText(text, emotes) {
+  if (!emotes) return [text];
+  const ranges = [];
+  for (const part of emotes.split("/")) {
+    const [id, positions] = part.split(":");
+    for (const pos of (positions || "").split(",")) {
+      const [start, end] = pos.split("-").map(Number);
+      if (Number.isInteger(start) && Number.isInteger(end) && end >= start) ranges.push({ id, start, end });
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start);
+  const chars = Array.from(text);
+  const out = [];
+  let at = 0;
+  for (const { id, start, end } of ranges) {
+    if (start < at || end >= chars.length) continue;
+    if (start > at) out.push(chars.slice(at, start).join(""));
+    const name = chars.slice(start, end + 1).join("");
+    out.push(el("img", { class: "emote", src: emoteUrl(id, "1.0"), srcset: `${emoteUrl(id, "2.0")} 2x`, alt: name, title: name, loading: "lazy" }));
+    at = end + 1;
+  }
+  if (at < chars.length) out.push(chars.slice(at).join(""));
+  return out;
+}
+
 // ---------- shared components ----------
 
 function messageRow(m, { showChannel = false, focus = false } = {}) {
   const userHref = m.user_id ? href(`/u/${encodeURIComponent(m.user_id)}`) : href("/search", { login: m.login });
   const name = el("a", { class: "name", href: userHref }, m.display_name);
   name.style.color = nameColor(m.color, m.login);
+  const deleted = m.deleted_at != null;
   return el(
     "li",
-    { class: `msg${focus ? " focus" : ""}`, "data-id": m.id },
+    {
+      class: `msg${focus ? " focus" : ""}${deleted ? " deleted" : ""}`,
+      "data-id": m.id,
+      title: deleted ? `Removed by a moderator, ${fmtDateTime(m.deleted_at)}` : null,
+    },
     el(
       "span",
       { class: "time" },
       el("a", { href: href(`/m/${m.id}`), title: `${fmtDateTime(m.sent_at)} · show surrounding chat` }, fmtMessageTime(m.sent_at)),
     ),
     showChannel ? el("a", { class: "channel", href: href(`/c/${m.channel}`) }, `#${m.channel}`) : null,
-    badgesFor(m.badges).map((b) => el("span", { class: `badge badge-${b.key}`, title: b.title, "aria-label": b.title }, b.icon)),
+    m.bits ? el("span", { class: "bits", title: `Cheered ${fmtInt(m.bits)} bits` }, `◆ ${fmtInt(m.bits)}`) : null,
+    badgeNodes(m.badges, m.channel),
     name,
     ": ",
-    m.text,
+    el("span", { class: "text" }, messageText(m.text, m.emotes)),
+    deleted ? el("span", { class: "deleted-tag" }, "deleted") : null,
+  );
+}
+
+/** "10m", "1h 30m", "3h", "7d": the largest unit, plus the next one if it isn't zero. */
+function fmtDuration(seconds) {
+  const units = [["d", 86400], ["h", 3600], ["m", 60], ["s", 1]];
+  const i = units.findIndex(([, size]) => seconds >= size);
+  if (i < 0) return "0s";
+  const [name, size] = units[i];
+  const out = `${Math.floor(seconds / size)}${name}`;
+  const next = units[i + 1];
+  const rest = next ? Math.floor((seconds % size) / next[1]) : 0;
+  return rest ? `${out} ${rest}${next[0]}` : out;
+}
+
+/** A ban, timeout, /clear or deleted message. */
+function moderationRow(a, { showChannel = false } = {}) {
+  const who = a.target_login
+    ? el("a", { class: "name", href: a.target_user_id ? href(`/u/${encodeURIComponent(a.target_user_id)}`) : href("/search", { login: a.target_login }) }, a.target_login)
+    : null;
+  const what = {
+    ban: [who, " was banned"],
+    timeout: [who, ` was timed out for ${fmtDuration(a.duration || 0)}`],
+    clear: ["Chat was cleared by a moderator"],
+    delete: ["A message from ", who, " was deleted"],
+  }[a.kind] || [a.kind];
+  return el(
+    "li",
+    { class: `msg mod mod-${a.kind}`, "data-id": a.id },
+    el("span", { class: "time", title: fmtDateTime(a.sent_at) }, fmtMessageTime(a.sent_at)),
+    showChannel ? el("a", { class: "channel", href: href(`/c/${a.channel}`) }, `#${a.channel}`) : null,
+    el("span", { class: "mod-icon", "aria-hidden": "true" }, "⊘"),
+    what,
+    a.text ? el("span", { class: "event-message" }, a.text) : null,
   );
 }
 
 /** Events that give or extend a sub, and how they're marked. */
 const SUB_KINDS = ["sub", "resub", "subgift", "submysterygift", "giftpaidupgrade", "primepaidupgrade", "anongiftpaidupgrade"];
-const eventIcon = (kind) => (kind === "raid" ? "⚑︎" : SUB_KINDS.includes(kind) ? "★︎" : "•");
+const eventIcon = (kind) => (kind === "raid" ? "⚑︎" : kind === "cheer" ? "◆︎" : SUB_KINDS.includes(kind) ? "★︎" : "•");
+const eventClass = (kind) => (kind === "raid" ? " event-raid" : kind === "cheer" ? " event-cheer" : SUB_KINDS.includes(kind) ? " event-sub" : "");
 
 /** A sub, raid or other event, worded like Twitch's own notice. */
 function eventRow(e, { showChannel = false } = {}) {
@@ -217,7 +325,7 @@ function eventRow(e, { showChannel = false } = {}) {
   else if (description) description = ` · ${description}`;
   return el(
     "li",
-    { class: `msg event${e.kind === "raid" ? " event-raid" : SUB_KINDS.includes(e.kind) ? " event-sub" : ""}`, "data-id": e.id },
+    { class: `msg event${eventClass(e.kind)}`, "data-id": e.id },
     el("span", { class: "time", title: fmtDateTime(e.sent_at) }, fmtMessageTime(e.sent_at)),
     showChannel ? el("a", { class: "channel", href: href(`/c/${e.channel}`) }, `#${e.channel}`) : null,
     el("span", { class: "event-icon", "aria-hidden": "true" }, eventIcon(e.kind)),
@@ -245,13 +353,14 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
     try {
       const page = await api(source.path, { ...params, before });
       const items = page[source.key];
+      await source.prepare?.(items);
       for (const m of items) newestId = Math.max(newestId, m.id);
       list.append(...items.map((m) => source.row(m, { showChannel })));
       footer.replaceChildren();
       if (!list.children.length) footer.append(el("p", { class: "muted" }, emptyText));
-      if (page.next) footer.append(el("button", { class: "secondary", onclick: () => load(page.next) }, `Load older ${source.key}`));
+      if (page.next) footer.append(el("button", { class: "secondary", onclick: () => load(page.next) }, `Load older ${source.noun}`));
     } catch (e) {
-      footer.replaceChildren(el("p", { class: "error" }, `Failed to load ${source.key}: ${e.message}`));
+      footer.replaceChildren(el("p", { class: "error" }, `Failed to load ${source.noun}: ${e.message}`));
     }
   }
 
@@ -259,6 +368,7 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
     const page = await api(source.path, { ...params, after: newestId, limit: 200 });
     const items = page[source.key];
     if (!items.length) return;
+    await source.prepare?.(items);
     newestId = Math.max(newestId, ...items.map((m) => m.id));
     const rows = items.map((m) => {
       const row = source.row(m, { showChannel });
@@ -290,8 +400,10 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
   return { root, ready, live };
 }
 
-const MESSAGES = { path: "/messages", key: "messages", row: messageRow };
-const EVENTS = { path: "/events", key: "events", row: eventRow };
+/** Paged endpoints for `pagedMessages`; `prepare` runs before rows are built. */
+const MESSAGES = { path: "/messages", key: "messages", noun: "messages", row: messageRow, prepare: (items) => loadBadges(items.map((m) => m.channel)) };
+const EVENTS = { path: "/events", key: "events", noun: "events", row: eventRow };
+const MODERATION = { path: "/moderation", key: "moderation", noun: "moderation actions", row: moderationRow };
 
 function liveBadge() {
   return el("span", { class: "live", role: "img", "aria-label": "Live", title: "Live: new messages appear automatically" });
@@ -330,10 +442,11 @@ function niceStep(raw) {
 const TICK_INTERVALS = [MINUTE, 5 * MINUTE, 15 * MINUTE, 30 * MINUTE, HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY];
 
 /**
- * Messages-over-time line chart with a hover crosshair. `points` must be dense
- * (one entry per bucket, zeros included). Clicking a point calls `onSelect`.
+ * Line chart over time with a hover crosshair. `points` must be dense (one
+ * entry per bucket, zeros included). `unit` names what is counted ("message",
+ * "viewer"). Clicking a point calls `onSelect`.
  */
-function activityChart(container, points, bucket, { onSelect } = {}) {
+function activityChart(container, points, bucket, { onSelect, unit = "message", label = `Messages per ${bucket.label}` } = {}) {
   const height = 160;
   const margin = { top: 8, right: 8, bottom: 22, left: 40 };
   const tooltip = el("div", { class: "tooltip", hidden: true });
@@ -356,7 +469,7 @@ function activityChart(container, points, bucket, { onSelect } = {}) {
       height,
       tabindex: 0,
       role: "img",
-      "aria-label": `Messages per ${bucket.label}. Use arrow keys to inspect values.`,
+      "aria-label": `${label}. Use arrow keys to inspect values.`,
     });
 
     for (let v = 0; v <= yMax; v += step) {
@@ -399,7 +512,7 @@ function activityChart(container, points, bucket, { onSelect } = {}) {
         for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
       }
       tooltip.replaceChildren(
-        el("div", { class: "tt-value" }, el("span", { class: "tt-key" }), `${fmtInt(p.n)} message${p.n === 1 ? "" : "s"}`),
+        el("div", { class: "tt-value" }, el("span", { class: "tt-key" }), `${fmtInt(p.n)} ${unit}${p.n === 1 ? "" : "s"}`),
         el("div", { class: "tt-label" }, `${dayTimeFmt.format(new Date(p.t))} – ${timeFmt.format(new Date(p.t + bucket.ms))}`),
         onSelect ? el("div", { class: "tt-hint" }, "Click to read this chat") : null,
       );
@@ -463,7 +576,7 @@ function densify(pairs, bucketMs, start, end) {
   return out;
 }
 
-function dataTable(points, bucket) {
+function dataTable(points, bucket, valueHeading = "Messages") {
   const rows = points.filter((p) => p.n > 0);
   return el(
     "details",
@@ -475,7 +588,7 @@ function dataTable(points, bucket) {
       el(
         "table",
         {},
-        el("thead", {}, el("tr", {}, el("th", {}, `${bucket.label[0].toUpperCase()}${bucket.label.slice(1)} starting`), el("th", { class: "num" }, "Messages"))),
+        el("thead", {}, el("tr", {}, el("th", {}, `${bucket.label[0].toUpperCase()}${bucket.label.slice(1)} starting`), el("th", { class: "num" }, valueHeading))),
         el("tbody", {}, rows.map((p) => el("tr", {}, el("td", {}, fmtDateTime(p.t)), el("td", { class: "num" }, fmtInt(p.n))))),
       ),
     ),
@@ -729,12 +842,22 @@ async function viewChannel(channel, params) {
   const from = range.span ? now - range.span : null;
   const filter = { channel, from };
 
-  const [stats, watched] = await Promise.all([api("/stats", filter), api("/watched")]);
+  const [stats, watched, profile] = await Promise.all([
+    api("/stats", filter),
+    api("/watched"),
+    api(`/profile/${encodeURIComponent(channel)}`).catch(() => null),
+    loadBadges([channel]),
+  ]);
   const path = `/c/${channel}`;
   const deleteBox = deleteChannelBox(channel, watched.find((w) => w.channel === channel));
   const header = [
-    el("h1", {}, channel),
-    el("p", { class: "subtitle" }, el("a", { href: `https://twitch.tv/${encodeURIComponent(channel)}`, target: "_blank", rel: "noopener" }, `twitch.tv/${channel}`)),
+    profileHeading(profile, channel),
+    el(
+      "p",
+      { class: "subtitle" },
+      el("a", { href: `https://twitch.tv/${encodeURIComponent(channel)}`, target: "_blank", rel: "noopener" }, `twitch.tv/${channel}`),
+      stats.live ? liveLine(stats.live) : null,
+    ),
     el(
       "div",
       { class: "filters" },
@@ -752,20 +875,26 @@ async function viewChannel(channel, params) {
   const start = from ?? stats.first_at;
   const end = range.span ? now : stats.last_at;
   const bucket = pickBucket(end - start);
-  const [activity, chatters, repeated] = await Promise.all([
+  const hasViewers = stats.peak_viewers != null;
+  const [activity, chatters, repeated, viewerActivity] = await Promise.all([
     api("/activity", { ...filter, bucket: bucket.ms, tz_offset: tzOffset() }),
     api("/top-chatters", { ...filter, limit: 15 }),
     api("/top-messages", { ...filter, limit: 15 }),
+    hasViewers ? api("/viewers", { ...filter, bucket: bucket.ms, tz_offset: tzOffset() }) : null,
   ]);
   const points = densify(activity.points, activity.bucket, start, end);
   const peak = points.reduce((best, p) => (p.n > best.n ? p : best), points[0]);
+  const viewerPoints = viewerActivity ? densify(viewerActivity.points, viewerActivity.bucket, start, end) : null;
 
   const chartBox = el("div", { class: "chart" });
+  const viewersBox = el("div", { class: "chart" });
   const latest = pagedMessages({ channel, limit: 50 });
   const events = pagedMessages(
     { channel, from, limit: 30 },
-    { source: EVENTS, emptyText: `No subs or raids in the last ${range.label}. Only events that happen while the recorder runs are captured.` },
+    { source: EVENTS, emptyText: `No subs, cheers or raids in the last ${range.label}. Only events that happen while the recorder runs are captured.` },
   );
+  const modActions = stats.bans + stats.timeouts + stats.deletions;
+  const moderation = modActions ? pagedMessages({ channel, from, limit: 30 }, { source: MODERATION }) : null;
   const subsTotal = stats.subs + stats.gift_subs;
 
   const view = el(
@@ -779,9 +908,18 @@ async function viewChannel(channel, params) {
       statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each on average`),
       statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
       statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.subs)} subbed · ${fmtInt(stats.gift_subs)} gifted`),
+      statTile("Bits", fmtCompact(stats.bits), `${fmtInt(stats.cheers)} cheer${stats.cheers === 1 ? "" : "s"}`),
+      hasViewers ? statTile("Peak viewers", fmtCompact(stats.peak_viewers), stats.live ? `${fmtInt(stats.live.viewer_count)} watching now` : "while recording") : null,
+      statTile(
+        "Moderation",
+        fmtCompact(modActions),
+        `${fmtInt(stats.timeouts)} timeout${stats.timeouts === 1 ? "" : "s"} · ${fmtInt(stats.bans)} ban${stats.bans === 1 ? "" : "s"} · ${fmtInt(stats.deletions)} deleted`,
+      ),
     ),
     panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
+    hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
     panel("events", ["Subs & events", liveBadge()], events.root),
+    moderation ? panel("moderation", ["Timeouts, bans & deletions", liveBadge()], moderation.root) : null,
     el(
       "div",
       { class: "grid-2" },
@@ -795,15 +933,42 @@ async function viewChannel(channel, params) {
     const stopChart = activityChart(chartBox, points, bucket, {
       onSelect: (p) => (location.hash = href("/search", { channel, from: p.t, to: p.t + bucket.ms })),
     });
-    const stopLive = latest.live();
-    const stopEvents = events.live();
-    return () => {
-      stopChart();
-      stopLive();
-      stopEvents();
-    };
+    const stopViewers = viewerPoints
+      ? activityChart(viewersBox, viewerPoints, bucket, {
+          unit: "viewer",
+          label: `Peak viewers per ${bucket.label}`,
+          onSelect: (p) => (location.hash = href("/search", { channel, from: p.t, to: p.t + bucket.ms })),
+        })
+      : null;
+    const stops = [stopChart, stopViewers, latest.live(), events.live(), moderation?.live()];
+    return () => stops.forEach((stop) => stop?.());
   };
   return view;
+}
+
+/** Page title with the Twitch profile picture when available. */
+function profileHeading(profile, fallbackName) {
+  return el(
+    "h1",
+    { class: "with-avatar" },
+    profile?.profile_image_url ? el("img", { class: "avatar", src: profile.profile_image_url, alt: "", width: 40, height: 40 }) : null,
+    profile?.display_name || fallbackName,
+    profile?.broadcaster_type ? el("span", { class: "chip type" }, profile.broadcaster_type) : null,
+  );
+}
+
+/** "● Live · 1,234 viewers · Just Chatting · up 2h 5m · title". */
+function liveLine(live) {
+  const up = fmtDuration(Math.floor((Date.now() - live.started_at) / 1000));
+  return el(
+    "span",
+    { class: "live-line" },
+    el("span", { class: "live-dot" }, "● Live"),
+    ` · ${fmtInt(live.viewer_count)} viewers`,
+    live.game_name ? ` · ${live.game_name}` : "",
+    ` · up ${up}`,
+    live.title ? el("span", { class: "live-title", title: live.title }, live.title) : null,
+  );
 }
 
 /**
@@ -1010,6 +1175,7 @@ async function viewSearch(params) {
 async function viewContext(id) {
   const ctx = await api(`/messages/${id}/context`, { n: 40 });
   const focus = ctx.messages.find((m) => m.id === ctx.focus);
+  await loadBadges([focus.channel]);
   const list = el("ul", { class: "messages" }, ctx.messages.map((m) => messageRow(m, { focus: m.id === ctx.focus })));
   const view = el(
     "div",
@@ -1038,12 +1204,20 @@ async function viewUser(userId) {
   const showChannel = user.channels.length > 1;
   const messages = pagedMessages({ user_id: userId, limit: 100 }, { showChannel });
   const events = totalEvents ? pagedMessages({ user_id: userId, limit: 30 }, { showChannel, source: EVENTS }) : null;
-  await Promise.all([messages.ready, events?.ready]);
+  const moderation = pagedMessages({ user_id: userId, limit: 30 }, { showChannel, source: MODERATION });
+  const [profile] = await Promise.all([
+    api(`/profile/${encodeURIComponent(current.login)}`).catch(() => null),
+    messages.ready,
+    events?.ready,
+    moderation.ready,
+  ]);
+  // Shown only for users who were ever timed out, banned or had a message deleted.
+  const moderated = moderation.root.querySelector("li") != null;
 
   const view = el(
     "div",
     {},
-    el("h1", {}, current.display_name),
+    profileHeading(profile, current.display_name),
     el(
       "p",
       { class: "subtitle" },
@@ -1094,15 +1268,12 @@ async function viewUser(userId) {
       ),
     ),
     events ? panel("user-events", ["Subs & events", liveBadge()], events.root) : null,
+    moderated ? panel("user-moderation", "Timeouts, bans & deletions", moderation.root) : null,
     panel("user-messages", ["Messages", liveBadge()], messages.root),
   );
   view.onMount = () => {
-    const stopMessages = messages.live();
-    const stopEvents = events?.live();
-    return () => {
-      stopMessages();
-      stopEvents?.();
-    };
+    const stops = [messages.live(), events?.live()];
+    return () => stops.forEach((stop) => stop?.());
   };
   return view;
 }

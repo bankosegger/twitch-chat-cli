@@ -11,6 +11,10 @@ services:
     build: .
     image: twitch-chat
     command: ["record", "--db", "/data/chat.db", "papaplatte"]
+    environment:
+      # Optional: records viewer counts. Set them in a .env file next to this one.
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
     volumes:
       - chat-data:/data
     restart: unless-stopped
@@ -21,6 +25,9 @@ services:
     environment:
       # Leave empty for no password. Set it in a .env file next to this one.
       TWITCH_CHAT_PASSWORD: ${TWITCH_CHAT_PASSWORD:-}
+      # Optional: profile pictures and badge images.
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
     ports:
       # Only reachable from this machine. Use "8080:8080" to expose it to the
       # network, and set TWITCH_CHAT_PASSWORD when you do.

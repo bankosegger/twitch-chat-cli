@@ -11,6 +11,7 @@ Connects to a channel's chat over IRC and displays it in a scrollable terminal U
 - Message filtering (search-as-you-type)
 - Highlight moderators / subscribers
 - Subs, resubs, gifted subs, raids and announcements shown inline as they happen
+- Cheers (bits), bans, timeouts and deleted messages: moderated messages are struck through
 - Headless `record` mode that stores chat from many channels in SQLite
 - Web UI (`serve`) with dashboards, full-text search and user history
 - Optional stream status (online/offline, title, category, viewers) when API credentials are provided
@@ -25,7 +26,7 @@ cargo run --release -- <channel>
 
 ## Recording chat to a database
 
-`record` runs headless (no terminal UI) and stores every chat message and event (subs, raids, ...) from one or more channels in a SQLite database. It is meant to run unattended on a server:
+`record` runs headless (no terminal UI) and stores every chat message, event (subs, cheers, raids, ...) and moderation action (bans, timeouts, deleted messages) from one or more channels in a SQLite database. With [API credentials](#twitch-api-credentials-optional) it also records each live channel's viewer count, title and category once a minute. It is meant to run unattended on a server:
 
 ```sh
 twitch-chat record --db chat.db papaplatte xqc
@@ -36,7 +37,8 @@ twitch-chat record --db chat.db papaplatte xqc
 - Each message's Twitch id is stored with a unique constraint, so duplicates are skipped.
 - It reconnects automatically. Messages sent while disconnected are lost, because Twitch IRC has no replay.
 - `Ctrl+C` / `SIGTERM` flush pending messages before exiting.
-- A line like `stored 412 message(s) and 3 event(s) in the last 60s` is logged to stderr every minute.
+- A line like `stored 412 message(s), 3 event(s) and 1 moderation action(s) in the last 60s` is logged to stderr every minute.
+- A ban or timeout marks the user's messages from the 10 minutes before it as deleted (`deleted_at`), like Twitch's chat clearing what's still on screen. A deleted single message is marked exactly.
 
 Schema (timestamps are Unix milliseconds):
 
@@ -53,10 +55,14 @@ CREATE TABLE messages (
     badges       TEXT NOT NULL, -- raw tag, e.g. 'subscriber/12,vip/1'
     text         TEXT NOT NULL,
     sent_at      INTEGER NOT NULL,
-    received_at  INTEGER NOT NULL
+    received_at  INTEGER NOT NULL,
+    bits         INTEGER,       -- bits cheered with the message
+    emotes       TEXT,          -- raw tag, e.g. '25:0-4,6-10' (character positions in text)
+    deleted_at   INTEGER        -- set when a moderator removed it
 );
 
--- Subs, raids, announcements, watch streaks, ... (IRC USERNOTICEs).
+-- Subs, cheers, raids, announcements, watch streaks, ... (IRC USERNOTICEs,
+-- plus a 'cheer' row for each message with bits).
 -- Only events that happen while the recorder runs are captured.
 CREATE TABLE events (
     id                     INTEGER PRIMARY KEY,
@@ -67,10 +73,10 @@ CREATE TABLE events (
     login                  TEXT NOT NULL,
     display_name           TEXT NOT NULL,
     color                  TEXT,
-    kind                   TEXT NOT NULL, -- 'sub', 'resub', 'subgift', 'submysterygift', 'raid', 'announcement', ...
+    kind                   TEXT NOT NULL, -- 'sub', 'resub', 'subgift', 'submysterygift', 'cheer', 'raid', 'announcement', ...
     tier                   TEXT,    -- 'Prime', '1000', '2000', '3000'
     months                 INTEGER, -- cumulative months (the recipient's, for gifts)
-    count                  INTEGER, -- subs in a gift bomb, or viewers in a raid
+    count                  INTEGER, -- subs in a gift bomb, bits in a cheer, or viewers in a raid
     recipient_login        TEXT,
     recipient_display_name TEXT,
     bulk_gift              INTEGER NOT NULL, -- 1 for each single gift of a gift bomb
@@ -79,7 +85,36 @@ CREATE TABLE events (
     sent_at                INTEGER NOT NULL,
     received_at            INTEGER NOT NULL
 );
+
+-- Bans, timeouts, /clear and single deleted messages (IRC CLEARCHAT / CLEARMSG).
+CREATE TABLE moderation (
+    id             INTEGER PRIMARY KEY,
+    channel        TEXT NOT NULL,
+    room_id        TEXT,
+    kind           TEXT NOT NULL, -- 'ban', 'timeout', 'clear', 'delete'
+    duration       INTEGER,       -- seconds, for timeouts
+    target_user_id TEXT,
+    target_login   TEXT,
+    target_msg_id  TEXT,          -- for 'delete': messages.msg_id
+    text           TEXT,          -- for 'delete': the deleted message
+    sent_at        INTEGER NOT NULL,
+    received_at    INTEGER NOT NULL
+);
+
+-- Viewer counts, once a minute while a channel is live (needs API credentials).
+CREATE TABLE stream_samples (
+    id           INTEGER PRIMARY KEY,
+    channel      TEXT NOT NULL,
+    stream_id    TEXT NOT NULL,
+    sampled_at   INTEGER NOT NULL,
+    started_at   INTEGER NOT NULL,
+    viewer_count INTEGER NOT NULL,
+    title        TEXT NOT NULL,
+    game_name    TEXT NOT NULL
+);
 ```
+
+Databases from older versions get the new tables and columns automatically when opened.
 
 A full-text index (`messages_fts`, SQLite FTS5) is kept in sync automatically. Example query:
 
@@ -98,10 +133,10 @@ twitch-chat serve --db chat.db --bind 0.0.0.0:8080   # reachable from other mach
 ```
 
 - **Channels**: every recorded channel, its message count and when the last message arrived. The **Recording** panel adds or removes channels for the recorder (it accepts a name, `#name` or a twitch.tv link).
-- **Channel dashboard**: messages over time, unique chatters, busiest period, sub count, a live list of subs, raids and other events, top chatters and most repeated messages, for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment. **Delete channel data…** removes everything recorded in the channel (and can stop recording it). The database file doesn't shrink afterwards; the space is reused for new messages, or run `sqlite3 chat.db VACUUM` while nothing else has it open.
+- **Channel dashboard**: messages over time, unique chatters, busiest period, subs, bits, moderation counts, live lists of subs/cheers/raids and of timeouts/bans/deletions, top chatters and most repeated messages; with API credentials also viewer counts over time, whether the channel is live now, and its profile picture. All of it for the last hour, 24 hours, 7 days, 30 days or all time. Messages show Twitch emotes, cheered bits, and (with API credentials) real badge images; moderated messages are struck through. for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment. **Delete channel data…** removes everything recorded in the channel (and can stop recording it). The database file doesn't shrink afterwards; the space is reused for new messages, or run `sqlite3 chat.db VACUUM` while nothing else has it open.
 - **Search**: full-text search across all messages, filterable by channel and user. Every word must appear, and words match as prefixes (`kek` finds `KEKW`).
 - **Context**: click a message's timestamp to see the conversation around it
-- **Users**: a chatter's message history, the names they used, and the channels they chat in
+- **Users**: a chatter's message history, the names they used, the channels they chat in, their subs and cheers, and any timeouts, bans or deleted messages
 
 It listens on localhost only by default. To expose it, set `TWITCH_CHAT_PASSWORD` (any username is accepted) and put it behind a TLS reverse proxy, or keep it on localhost and use an SSH tunnel: `ssh -L 8080:localhost:8080 your-server`.
 
@@ -178,16 +213,22 @@ sudo systemctl enable --now twitch-chat-record twitch-chat-web
 journalctl -u twitch-chat-record -f
 ```
 
-## Stream status (optional)
+## Twitch API credentials (optional)
 
-To show live stream status, create a [Twitch application](https://dev.twitch.tv/console/apps) and set its credentials in a `.env` file (see `.env.example`):
+Create a [Twitch application](https://dev.twitch.tv/console/apps) and set its credentials in a `.env` file (see `.env.example`) or the environment:
 
 ```
 TWITCH_CLIENT_ID=your_client_id
 TWITCH_CLIENT_SECRET=your_client_secret
 ```
 
-Without credentials, the app runs in chat-only mode.
+They enable:
+
+- **Terminal UI**: live stream status (title, category, viewers, uptime).
+- **`record`**: viewer counts, title and category of live channels, once a minute.
+- **`serve`**: profile pictures and real badge images.
+
+Only public data is read (app access token, no login). Without credentials everything else works as before.
 
 ## Keybindings
 

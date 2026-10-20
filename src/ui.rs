@@ -6,7 +6,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, ChatItem, ConnStatus, StreamPanel};
-use crate::irc::{ChatMessage, UserNotice};
+use crate::irc::{ChatMessage, ModAction, ModKind, UserNotice};
 
 const NAME_PALETTE: [(u8, u8, u8); 15] = [
     (255, 0, 0),
@@ -43,6 +43,7 @@ fn name_color(name: &str) -> (u8, u8, u8) {
 const MOD_HIGHLIGHT_BG: Color = Color::Rgb(20, 60, 30);
 const SUB_HIGHLIGHT_BG: Color = Color::Rgb(55, 25, 65);
 const EVENT_BG: Color = Color::Rgb(30, 22, 45);
+const BITS_COLOR: Color = Color::Rgb(255, 196, 60);
 
 fn is_mod(msg: &ChatMessage) -> bool {
     msg.badges.iter().any(|b| b == "MOD" || b == "BROADCASTER")
@@ -62,12 +63,26 @@ fn highlight_bg(msg: &ChatMessage, app: &App) -> Option<Color> {
     }
 }
 
-fn build_tokens(msg: &ChatMessage, bg: Option<Color>) -> Vec<Token> {
+fn build_tokens(msg: &ChatMessage, bg: Option<Color>, deleted: bool) -> Vec<Token> {
     let mut tokens = Vec::new();
-    let apply_bg = |style: Style| match bg {
-        Some(color) => style.bg(color),
-        None => style,
+    let apply_bg = |style: Style| {
+        let style = match bg {
+            Some(color) => style.bg(color),
+            None => style,
+        };
+        if deleted {
+            style.fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT)
+        } else {
+            style
+        }
     };
+
+    if let Some(bits) = msg.bits {
+        tokens.push(Token {
+            text: format!("◆{bits}"),
+            style: apply_bg(Style::default().fg(BITS_COLOR).add_modifier(Modifier::BOLD)),
+        });
+    }
 
     for badge in &msg.badges {
         tokens.push(Token {
@@ -207,9 +222,44 @@ fn item_to_lines(item: &ChatItem, width: usize, app: &App) -> Vec<Line<'static>>
     match item {
         ChatItem::Message(msg) => {
             let bg = highlight_bg(msg, app);
-            tokens_to_lines(build_tokens(msg, bg), width, bg)
+            tokens_to_lines(build_tokens(msg, bg, app.is_deleted(msg)), width, bg)
         }
         ChatItem::Event(event) => tokens_to_lines(event_tokens(event), width, Some(EVENT_BG)),
+        ChatItem::Moderation(action) => tokens_to_lines(moderation_tokens(action), width, None),
+    }
+}
+
+fn moderation_tokens(action: &ModAction) -> Vec<Token> {
+    let who = action.target_login.as_deref().unwrap_or("someone");
+    let text = match action.kind {
+        ModKind::Ban => format!("⊘ {who} was banned"),
+        ModKind::Timeout(seconds) => format!("⊘ {who} was timed out for {}", format_duration(seconds)),
+        ModKind::Clear => "⊘ chat was cleared by a moderator".to_string(),
+        ModKind::Delete => format!("⊘ a message from {who} was deleted"),
+    };
+    let style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+    text.split_whitespace()
+        .map(|word| Token {
+            text: word.to_string(),
+            style,
+        })
+        .collect()
+}
+
+/// The largest unit, plus the next one if it isn't zero: `600` → `10m`,
+/// `90` → `1m 30s`, `3609` → `1h`, `86400` → `1d`.
+fn format_duration(seconds: i64) -> String {
+    const UNITS: [(&str, i64); 4] = [("d", 86_400), ("h", 3_600), ("m", 60), ("s", 1)];
+    let Some(i) = UNITS.iter().position(|&(_, size)| seconds >= size) else {
+        return "0s".to_string();
+    };
+    let (name, size) = UNITS[i];
+    let out = format!("{}{name}", seconds / size);
+    match UNITS.get(i + 1) {
+        Some(&(next, next_size)) if (seconds % size) / next_size > 0 => {
+            format!("{out} {}{next}", (seconds % size) / next_size)
+        }
+        _ => out,
     }
 }
 
@@ -413,4 +463,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
     };
     frame.render_widget(Paragraph::new(footer), chunks[3]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_duration;
+
+    #[test]
+    fn formats_durations() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(10), "10s");
+        assert_eq!(format_duration(90), "1m 30s");
+        assert_eq!(format_duration(600), "10m");
+        assert_eq!(format_duration(3609), "1h");
+        assert_eq!(format_duration(5400), "1h 30m");
+        assert_eq!(format_duration(1_209_600), "14d");
+    }
 }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path as UrlPath, Query, Request, State};
+use axum::extract::{FromRef, Path as UrlPath, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -15,7 +15,30 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use crate::helix::Helix;
 use crate::store::{self, RemoveWatched, Store};
+
+mod twitch;
+use twitch::Twitch;
+
+/// Handlers take the part they need: `State<Arc<Db>>` or `State<Arc<Twitch>>`.
+#[derive(Clone)]
+struct AppState {
+    db: Arc<Db>,
+    twitch: Arc<Twitch>,
+}
+
+impl FromRef<AppState> for Arc<Db> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.db)
+    }
+}
+
+impl FromRef<AppState> for Arc<Twitch> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.twitch)
+    }
+}
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 const APP_JS: &str = include_str!("web/app.js");
@@ -37,6 +60,14 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
         path: db_path.to_path_buf(),
         idle: Mutex::new(Vec::new()),
     });
+    let helix = Helix::from_env();
+    if helix.is_none() {
+        eprintln!("set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to show profile pictures and badges");
+    }
+    let state = AppState {
+        db,
+        twitch: Arc::new(Twitch::new(helix)),
+    };
 
     let api = Router::new()
         .route("/channels", get(channels))
@@ -49,11 +80,15 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
         .route("/messages", get(messages))
         .route("/messages/{id}/context", get(message_context))
         .route("/events", get(events))
+        .route("/moderation", get(moderation))
+        .route("/viewers", get(viewers))
         .route("/users", get(search_users))
         .route("/users/{user_id}", get(user))
         .route("/watched", get(watched).post(add_watched))
         .route("/watched/{channel}", delete(remove_watched))
-        .with_state(db);
+        .route("/profile/{login}", get(twitch::profile))
+        .route("/badges", get(twitch::badges))
+        .with_state(state);
 
     let mut app = Router::new()
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }))
@@ -223,15 +258,20 @@ impl Filter {
     }
 
     fn range(range: &RangeParams) -> Self {
+        Self::range_on(range, "sent_at")
+    }
+
+    /// Like `range`, for a table whose timestamp column is `time_column`.
+    fn range_on(range: &RangeParams, time_column: &str) -> Self {
         let mut f = Filter::default();
         if let Some(channel) = non_empty(&range.channel) {
             f.add("channel = ?", [Value::Text(channel.to_lowercase())]);
         }
         if let Some(from) = range.from {
-            f.add("sent_at >= ?", [Value::Integer(from)]);
+            f.add(&format!("{time_column} >= ?"), [Value::Integer(from)]);
         }
         if let Some(to) = range.to {
-            f.add("sent_at < ?", [Value::Integer(to)]);
+            f.add(&format!("{time_column} < ?"), [Value::Integer(to)]);
         }
         f
     }
@@ -434,10 +474,35 @@ struct Stats {
     subs: i64,
     /// Gifted subs, counted one per recipient.
     gift_subs: i64,
+    bits: i64,
+    cheers: i64,
+    bans: i64,
+    timeouts: i64,
+    /// Single messages deleted by moderators.
+    deletions: i64,
+    /// Highest sampled viewer count; `None` without samples.
+    peak_viewers: Option<i64>,
+    /// The latest sample, if the channel is live now.
+    live: Option<LiveStream>,
 }
+
+#[derive(Serialize)]
+struct LiveStream {
+    title: String,
+    game_name: String,
+    viewer_count: i64,
+    started_at: i64,
+    sampled_at: i64,
+}
+
+/// Samples are taken every minute; older than this means the stream ended
+/// (or the recorder stopped).
+const LIVE_SAMPLE_MAX_AGE_MS: i64 = 3 * 60 * 1000;
 
 async fn stats(State(db): State<Arc<Db>>, Query(range): Query<RangeParams>) -> ApiResult<Stats> {
     let filter = Filter::range(&range);
+    let samples_filter = Filter::range_on(&range, "sampled_at");
+    let channel = non_empty(&range.channel).map(str::to_lowercase);
     db.query(move |conn| {
         let sql = format!(
             "SELECT count(*), count(DISTINCT coalesce(user_id, login)), min(sent_at), max(sent_at)
@@ -450,13 +515,64 @@ async fn stats(State(db): State<Arc<Db>>, Query(range): Query<RangeParams>) -> A
             })?;
         let sql = format!(
             "SELECT count(*) FILTER (WHERE kind IN ('sub', 'resub')),
-                    count(*) FILTER (WHERE kind = 'subgift')
+                    count(*) FILTER (WHERE kind = 'subgift'),
+                    coalesce(sum(count) FILTER (WHERE kind = 'cheer'), 0),
+                    count(*) FILTER (WHERE kind = 'cheer')
              FROM events {}",
             filter.sql()
         );
-        let (subs, gift_subs) =
-            conn.query_row(&sql, params_from_iter(&filter.args), |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(Stats { messages, chatters, first_at, last_at, subs, gift_subs })
+        let (subs, gift_subs, bits, cheers) = conn.query_row(&sql, params_from_iter(&filter.args), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        let sql = format!(
+            "SELECT count(*) FILTER (WHERE kind = 'ban'),
+                    count(*) FILTER (WHERE kind = 'timeout'),
+                    count(*) FILTER (WHERE kind = 'delete')
+             FROM moderation {}",
+            filter.sql()
+        );
+        let (bans, timeouts, deletions) = conn.query_row(&sql, params_from_iter(&filter.args), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        let peak_viewers = conn.query_row(
+            &format!("SELECT max(viewer_count) FROM stream_samples {}", samples_filter.sql()),
+            params_from_iter(&samples_filter.args),
+            |r| r.get(0),
+        )?;
+        let live = match channel {
+            Some(channel) => conn
+                .query_row(
+                    "SELECT title, game_name, viewer_count, started_at, sampled_at FROM stream_samples
+                     WHERE channel = ?1 AND sampled_at >= ?2 ORDER BY sampled_at DESC LIMIT 1",
+                    rusqlite::params![channel, store::now_millis() - LIVE_SAMPLE_MAX_AGE_MS],
+                    |r| {
+                        Ok(LiveStream {
+                            title: r.get(0)?,
+                            game_name: r.get(1)?,
+                            viewer_count: r.get(2)?,
+                            started_at: r.get(3)?,
+                            sampled_at: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()?,
+            None => None,
+        };
+        Ok(Stats {
+            messages,
+            chatters,
+            first_at,
+            last_at,
+            subs,
+            gift_subs,
+            bits,
+            cheers,
+            bans,
+            timeouts,
+            deletions,
+            peak_viewers,
+            live,
+        })
     })
     .await
     .map(Json)
@@ -479,21 +595,45 @@ struct Activity {
     points: Vec<(i64, i64)>,
 }
 
+/// Messages per bucket.
 async fn activity(
     State(db): State<Arc<Db>>,
     Query(range): Query<RangeParams>,
     Query(p): Query<ActivityParams>,
+) -> ApiResult<Activity> {
+    let filter = Filter::range(&range);
+    bucketed(&db, &range, &p, "count(*)", "messages", "sent_at", filter).await
+}
+
+/// Peak viewer count per bucket, while live.
+async fn viewers(
+    State(db): State<Arc<Db>>,
+    Query(range): Query<RangeParams>,
+    Query(p): Query<ActivityParams>,
+) -> ApiResult<Activity> {
+    let filter = Filter::range_on(&range, "sampled_at");
+    bucketed(&db, &range, &p, "max(viewer_count)", "stream_samples", "sampled_at", filter).await
+}
+
+/// `SELECT bucket, {value} FROM {table}`, grouped into buckets of `time_column`.
+async fn bucketed(
+    db: &Arc<Db>,
+    range: &RangeParams,
+    p: &ActivityParams,
+    value: &'static str,
+    table: &'static str,
+    time_column: &'static str,
+    filter: Filter,
 ) -> ApiResult<Activity> {
     let mut bucket = p.bucket.max(1000);
     if let (Some(from), Some(to)) = (range.from, range.to) {
         bucket = bucket.max((to - from) / MAX_ACTIVITY_BUCKETS);
     }
     let offset = p.tz_offset;
-    let filter = Filter::range(&range);
     db.query(move |conn| {
         let sql = format!(
-            "SELECT ((sent_at + ?1) / ?2) * ?2 - ?1 AS t, count(*)
-             FROM messages {} GROUP BY t ORDER BY t",
+            "SELECT (({time_column} + ?1) / ?2) * ?2 - ?1 AS t, {value}
+             FROM {table} {} GROUP BY t ORDER BY t",
             filter.sql()
         );
         // Numbered and positional parameters share one sequence: ?1 and ?2
@@ -598,10 +738,15 @@ struct Message {
     badges: String,
     text: String,
     sent_at: i64,
+    bits: Option<i64>,
+    /// Raw `emotes` tag; positions count characters (code points) of `text`.
+    emotes: Option<String>,
+    /// Set when a moderator removed it.
+    deleted_at: Option<i64>,
 }
 
 const MESSAGE_COLUMNS: &str =
-    "id, msg_id, channel, user_id, login, display_name, color, badges, text, sent_at";
+    "id, msg_id, channel, user_id, login, display_name, color, badges, text, sent_at, bits, emotes, deleted_at";
 
 fn message_from_row(r: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
@@ -615,6 +760,9 @@ fn message_from_row(r: &Row<'_>) -> rusqlite::Result<Message> {
         badges: r.get(7)?,
         text: r.get(8)?,
         sent_at: r.get(9)?,
+        bits: r.get(10)?,
+        emotes: r.get(11)?,
+        deleted_at: r.get(12)?,
     })
 }
 
@@ -819,6 +967,72 @@ async fn events(
             (e.sent_at, e.id)
         })?;
         Ok(EventPage { events, next })
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Serialize)]
+struct ModRow {
+    id: i64,
+    channel: String,
+    /// `ban`, `timeout`, `clear` or `delete`.
+    kind: String,
+    /// Seconds, for timeouts.
+    duration: Option<i64>,
+    target_user_id: Option<String>,
+    target_login: Option<String>,
+    /// The deleted message, for `delete`.
+    text: Option<String>,
+    sent_at: i64,
+}
+
+const MOD_COLUMNS: &str = "id, channel, kind, duration, target_user_id, target_login, text, sent_at";
+
+fn mod_from_row(r: &Row<'_>) -> rusqlite::Result<ModRow> {
+    Ok(ModRow {
+        id: r.get(0)?,
+        channel: r.get(1)?,
+        kind: r.get(2)?,
+        duration: r.get(3)?,
+        target_user_id: r.get(4)?,
+        target_login: r.get(5)?,
+        text: r.get(6)?,
+        sent_at: r.get(7)?,
+    })
+}
+
+#[derive(Deserialize)]
+struct ModParams {
+    /// Actions against this user.
+    user_id: Option<String>,
+    before: Option<String>,
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ModPage {
+    moderation: Vec<ModRow>,
+    next: Option<String>,
+}
+
+/// Bans, timeouts, /clear and deleted messages, paginated like `/messages`.
+async fn moderation(
+    State(db): State<Arc<Db>>,
+    Query(range): Query<RangeParams>,
+    Query(p): Query<ModParams>,
+) -> ApiResult<ModPage> {
+    let limit = p.limit.unwrap_or(100).clamp(1, 500);
+    let mut filter = Filter::range(&range);
+    if let Some(user_id) = non_empty(&p.user_id) {
+        filter.add("target_user_id = ?", [Value::Text(user_id.to_string())]);
+    }
+    let page = PageParams::new(&mut filter, &p.before, p.after, limit)?;
+    db.query(move |conn| {
+        let (moderation, next) =
+            page.fetch(conn, MOD_COLUMNS, "moderation", &filter, mod_from_row, |m| (m.sent_at, m.id))?;
+        Ok(ModPage { moderation, next })
     })
     .await
     .map(Json)

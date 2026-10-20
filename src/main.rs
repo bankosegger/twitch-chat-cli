@@ -22,7 +22,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use app::App;
-use helix::StreamStatus;
+use helix::{Helix, StreamStatus};
 use irc::ChatEvent;
 
 /// Watch a Twitch channel's chat in your terminal.
@@ -96,12 +96,7 @@ async fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let credentials = match (env::var("TWITCH_CLIENT_ID"), env::var("TWITCH_CLIENT_SECRET")) {
-        (Ok(id), Ok(secret)) if !id.is_empty() && !secret.is_empty() => Some((id, secret)),
-        _ => None,
-    };
-
-    let result = run(&mut terminal, channel, credentials).await;
+    let result = run(&mut terminal, channel, Helix::from_env()).await;
 
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
@@ -112,16 +107,16 @@ async fn main() -> io::Result<()> {
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     channel: String,
-    credentials: Option<(String, String)>,
+    helix: Option<Helix>,
 ) -> io::Result<()> {
     let (tx, mut rx) = mpsc::channel::<ChatEvent>(1024);
     // A fixed list: dropping the sender tells the client it never changes.
     let (_, channels) = tokio::sync::watch::channel(vec![channel.clone()]);
     tokio::spawn(irc::run(channels, tx));
 
-    let mut stream_rx = credentials.map(|(client_id, client_secret)| {
+    let mut stream_rx = helix.map(|helix| {
         let (stx, srx) = mpsc::unbounded_channel::<StreamStatus>();
-        tokio::spawn(helix::run(channel.clone(), client_id, client_secret, stx));
+        tokio::spawn(helix::run(channel.clone(), helix, stx));
         srx
     });
 
@@ -181,6 +176,10 @@ async fn run(
                     }
                     Some(ChatEvent::UserNotice(event)) => {
                         app.push_event(event);
+                        dirty = true;
+                    }
+                    Some(ChatEvent::Moderation(action)) => {
+                        app.push_moderation(action);
                         dirty = true;
                     }
                     Some(ChatEvent::Connecting) => {

@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
-use crate::irc::{self, ChatEvent, ChatMessage, UserNotice};
-use crate::store::{self, Store};
+use crate::helix::Helix;
+use crate::irc::{self, ChatEvent, ChatMessage, ModAction, UserNotice};
+use crate::store::{self, Store, StreamSample};
 
 /// Flush to the database once this many messages are pending...
 const BATCH_SIZE: usize = 500;
@@ -17,17 +18,20 @@ const STATS_INTERVAL: Duration = Duration::from_secs(60);
 const CHANNELS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Bounded so a stalled database applies backpressure instead of growing memory.
 const QUEUE_CAPACITY: usize = 10_000;
+/// How often to record viewer counts of live channels.
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Messages and events received since the last flush.
+/// Messages, events and moderation actions received since the last flush.
 #[derive(Default)]
 struct Pending {
     messages: Vec<ChatMessage>,
     events: Vec<UserNotice>,
+    moderation: Vec<ModAction>,
 }
 
 impl Pending {
     fn len(&self) -> usize {
-        self.messages.len() + self.events.len()
+        self.messages.len() + self.events.len() + self.moderation.len()
     }
 }
 
@@ -51,6 +55,14 @@ pub async fn run(pinned: Vec<String>, db_path: &Path) -> io::Result<()> {
 
     let (channels_tx, channels_rx) = watch::channel(initial);
     let (tx, mut rx) = mpsc::channel::<ChatEvent>(QUEUE_CAPACITY);
+    let (samples_tx, mut samples_rx) = mpsc::channel::<Vec<StreamSample>>(16);
+    match Helix::from_env() {
+        Some(helix) => {
+            eprintln!("recording viewer counts every {}s", SAMPLE_INTERVAL.as_secs());
+            tokio::spawn(sample_viewers(helix, channels_rx.clone(), samples_tx));
+        }
+        None => eprintln!("set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to also record viewer counts"),
+    }
     tokio::spawn(irc::run(channels_rx, tx));
 
     let mut pending = Pending::default();
@@ -67,8 +79,12 @@ pub async fn run(pinned: Vec<String>, db_path: &Path) -> io::Result<()> {
         tokio::select! {
             maybe_event = rx.recv() => {
                 match maybe_event {
-                    Some(ChatEvent::Message(msg)) => pending.messages.push(msg),
+                    Some(ChatEvent::Message(msg)) => {
+                        pending.events.extend(msg.cheer());
+                        pending.messages.push(msg);
+                    }
                     Some(ChatEvent::UserNotice(event)) => pending.events.push(event),
+                    Some(ChatEvent::Moderation(action)) => pending.moderation.push(action),
                     Some(ChatEvent::Connecting) => eprintln!("connecting..."),
                     Some(ChatEvent::Connected) => eprintln!("connected"),
                     Some(ChatEvent::Disconnected(reason)) => eprintln!("disconnected: {reason}"),
@@ -79,13 +95,18 @@ pub async fn run(pinned: Vec<String>, db_path: &Path) -> io::Result<()> {
                     stored_since_stats.add(flush(&mut store, &mut pending));
                 }
             }
+            Some(samples) = samples_rx.recv() => {
+                if let Err(e) = tokio::task::block_in_place(|| store.insert_samples(&samples)) {
+                    eprintln!("failed to store viewer counts: {e}");
+                }
+            }
             _ = flush_tick.tick() => {
                 stored_since_stats.add(flush(&mut store, &mut pending));
             }
             _ = stats_tick.tick() => {
-                let Stored { messages, events } = std::mem::take(&mut stored_since_stats);
+                let Stored { messages, events, moderation } = std::mem::take(&mut stored_since_stats);
                 eprintln!(
-                    "stored {messages} message(s) and {events} event(s) in the last {}s",
+                    "stored {messages} message(s), {events} event(s) and {moderation} moderation action(s) in the last {}s",
                     STATS_INTERVAL.as_secs()
                 );
             }
@@ -134,21 +155,70 @@ fn log_changes(old: &[String], new: &[String]) {
 struct Stored {
     messages: usize,
     events: usize,
+    moderation: usize,
 }
 
 impl Stored {
     fn add(&mut self, other: Stored) {
         self.messages += other.messages;
         self.events += other.events;
+        self.moderation += other.moderation;
     }
 }
 
 /// Writes and clears `pending`, returning how many rows were inserted. On a
 /// database error the batch is logged and dropped so recording can continue.
+/// Messages go first so a deletion in the same batch finds its message.
 fn flush(store: &mut Store, pending: &mut Pending) -> Stored {
     Stored {
         messages: insert_all(&mut pending.messages, "message", |batch| store.insert_batch(batch)),
         events: insert_all(&mut pending.events, "event", |batch| store.insert_events(batch)),
+        moderation: insert_all(&mut pending.moderation, "moderation action", |batch| {
+            store.insert_moderation(batch)
+        }),
+    }
+}
+
+/// Every `SAMPLE_INTERVAL`, reads the viewer counts of whichever watched
+/// channels are live and sends them to be stored.
+async fn sample_viewers(helix: Helix, channels: watch::Receiver<Vec<String>>, tx: mpsc::Sender<Vec<StreamSample>>) {
+    let mut tick = tokio::time::interval(SAMPLE_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_error: Option<String> = None;
+    loop {
+        tick.tick().await;
+        let logins = channels.borrow().clone();
+        if logins.is_empty() {
+            continue;
+        }
+        let streams = match helix.streams(&logins).await {
+            Ok(streams) => streams,
+            Err(e) => {
+                // Logged once per distinct error, not every minute.
+                if last_error.as_ref() != Some(&e) {
+                    eprintln!("viewer counts: {e}");
+                    last_error = Some(e);
+                }
+                continue;
+            }
+        };
+        last_error = None;
+        let now = store::now_millis();
+        let samples = streams
+            .into_iter()
+            .map(|s| StreamSample {
+                started_at: s.started_at().map_or(now, |t| (t.unix_timestamp_nanos() / 1_000_000) as i64),
+                channel: s.user_login.to_lowercase(),
+                stream_id: s.id,
+                sampled_at: now,
+                viewer_count: s.viewer_count as i64,
+                title: s.title,
+                game_name: s.game_name,
+            })
+            .collect::<Vec<_>>();
+        if !samples.is_empty() && tx.send(samples).await.is_err() {
+            return;
+        }
     }
 }
 
