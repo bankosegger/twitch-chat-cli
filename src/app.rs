@@ -1,9 +1,17 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::helix::{StreamInfo, StreamStatus};
-use crate::irc::ChatMessage;
+use crate::irc::{ChatMessage, UserNotice};
 
 const MAX_MESSAGES: usize = 500;
+
+/// One entry in the chat view.
+#[derive(Debug, Clone)]
+pub enum ChatItem {
+    Message(ChatMessage),
+    /// A sub, raid, announcement, ...
+    Event(UserNotice),
+}
 
 #[derive(Debug, Clone)]
 pub enum ConnStatus {
@@ -24,7 +32,7 @@ pub enum StreamPanel {
 
 pub struct App {
     pub channel: String,
-    pub messages: VecDeque<ChatMessage>,
+    pub messages: VecDeque<ChatItem>,
     pub status: ConnStatus,
     pub last_notice: Option<String>,
     pub skip: usize,
@@ -38,6 +46,8 @@ pub struct App {
     pub highlight_subs: bool,
     pub stream_panel: StreamPanel,
     pub mods_seen: BTreeSet<String>,
+    /// New, renewed and gifted subs since the client started.
+    pub subs_seen: usize,
 }
 
 impl App {
@@ -62,6 +72,7 @@ impl App {
                 StreamPanel::Disabled
             },
             mods_seen: BTreeSet::new(),
+            subs_seen: 0,
         }
     }
 
@@ -91,13 +102,19 @@ impl App {
         self.filter_input.as_deref().unwrap_or(&self.filter)
     }
 
-    pub fn message_matches(&self, msg: &ChatMessage) -> bool {
+    pub fn message_matches(&self, item: &ChatItem) -> bool {
         let needle = self.effective_filter();
         if needle.is_empty() {
             return true;
         }
         let needle = needle.to_lowercase();
-        msg.display_name.to_lowercase().contains(&needle) || msg.text.to_lowercase().contains(&needle)
+        let contains = |s: &str| s.to_lowercase().contains(&needle);
+        match item {
+            ChatItem::Message(msg) => contains(&msg.display_name) || contains(&msg.text),
+            ChatItem::Event(e) => {
+                contains(&e.display_name) || contains(&e.system_text) || e.text.as_deref().is_some_and(contains)
+            }
+        }
     }
 
     pub fn start_filter_edit(&mut self) {
@@ -137,7 +154,21 @@ impl App {
         if msg.badges.iter().any(|b| b == "MOD") {
             self.mods_seen.insert(msg.display_name.clone());
         }
-        self.messages.push_back(msg);
+        self.push_item(ChatItem::Message(msg));
+    }
+
+    pub fn push_event(&mut self, event: UserNotice) {
+        if event.is_sub() {
+            self.subs_seen += 1;
+        }
+        // A gift bomb's own notice already says how many subs it gave.
+        if !event.bulk_gift {
+            self.push_item(ChatItem::Event(event));
+        }
+    }
+
+    fn push_item(&mut self, item: ChatItem) {
+        self.messages.push_back(item);
         if self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();
         }

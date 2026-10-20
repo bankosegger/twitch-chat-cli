@@ -47,6 +47,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
         .route("/top-messages", get(top_messages))
         .route("/messages", get(messages))
         .route("/messages/{id}/context", get(message_context))
+        .route("/events", get(events))
         .route("/users", get(search_users))
         .route("/users/{user_id}", get(user))
         .route("/watched", get(watched).post(add_watched))
@@ -389,6 +390,10 @@ struct Stats {
     chatters: i64,
     first_at: Option<i64>,
     last_at: Option<i64>,
+    /// New subs and resubs, including Prime.
+    subs: i64,
+    /// Gifted subs, counted one per recipient.
+    gift_subs: i64,
 }
 
 async fn stats(State(db): State<Arc<Db>>, Query(range): Query<RangeParams>) -> ApiResult<Stats> {
@@ -399,14 +404,19 @@ async fn stats(State(db): State<Arc<Db>>, Query(range): Query<RangeParams>) -> A
              FROM messages {}",
             filter.sql()
         );
-        Ok(conn.query_row(&sql, params_from_iter(&filter.args), |r| {
-            Ok(Stats {
-                messages: r.get(0)?,
-                chatters: r.get(1)?,
-                first_at: r.get(2)?,
-                last_at: r.get(3)?,
-            })
-        })?)
+        let (messages, chatters, first_at, last_at) =
+            conn.query_row(&sql, params_from_iter(&filter.args), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
+        let sql = format!(
+            "SELECT count(*) FILTER (WHERE kind IN ('sub', 'resub')),
+                    count(*) FILTER (WHERE kind = 'subgift')
+             FROM events {}",
+            filter.sql()
+        );
+        let (subs, gift_subs) =
+            conn.query_row(&sql, params_from_iter(&filter.args), |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(Stats { messages, chatters, first_at, last_at, subs, gift_subs })
     })
     .await
     .map(Json)
@@ -576,9 +586,7 @@ struct MessagesParams {
     q: Option<String>,
     /// Cursor from a previous page's `next`.
     before: Option<String>,
-    /// Only messages with an id above this, for polling. The oldest new
-    /// messages come first when there are more than `limit`, so repeated polls
-    /// never skip any.
+    /// Only messages with an id above this, for polling.
     after: Option<i64>,
     limit: Option<usize>,
 }
@@ -607,52 +615,170 @@ async fn messages(
     if let Some(q) = non_empty(&p.q).and_then(fts_query) {
         filter.add("id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)", [Value::Text(q)]);
     }
-    if let Some(before) = non_empty(&p.before) {
-        let (sent_at, id) = before
-            .split_once(':')
-            .and_then(|(t, id)| Some((t.parse::<i64>().ok()?, id.parse::<i64>().ok()?)))
-            .ok_or_else(|| ApiError::BadRequest("invalid cursor".to_string()))?;
-        filter.add(
-            "(sent_at < ? OR (sent_at = ? AND id < ?))",
-            [Value::Integer(sent_at), Value::Integer(sent_at), Value::Integer(id)],
-        );
-    }
-
-    let after = p.after;
-    if let Some(after) = after {
-        filter.add("id > ?", [Value::Integer(after)]);
-    }
-
+    let page = PageParams::new(&mut filter, &p.before, p.after, limit)?;
     db.query(move |conn| {
-        if after.is_some() {
-            let sql = format!(
-                "SELECT {MESSAGE_COLUMNS} FROM messages {} ORDER BY id LIMIT {limit}",
-                filter.sql()
+        let (messages, next) = page.fetch(conn, MESSAGE_COLUMNS, "messages", &filter, message_from_row, |m| {
+            (m.sent_at, m.id)
+        })?;
+        Ok(MessagePage { messages, next })
+    })
+    .await
+    .map(Json)
+}
+
+/// Pagination shared by `/messages` and `/events`: newest first with a
+/// `sent_at:id` cursor, or, when polling with `after`, rows above that id.
+struct PageParams {
+    polling: bool,
+    limit: usize,
+}
+
+impl PageParams {
+    /// Adds the cursor conditions to `filter`.
+    fn new(filter: &mut Filter, before: &Option<String>, after: Option<i64>, limit: usize) -> Result<Self, ApiError> {
+        if let Some(before) = non_empty(before) {
+            let (sent_at, id) = before
+                .split_once(':')
+                .and_then(|(t, id)| Some((t.parse::<i64>().ok()?, id.parse::<i64>().ok()?)))
+                .ok_or_else(|| ApiError::BadRequest("invalid cursor".to_string()))?;
+            filter.add(
+                "(sent_at < ? OR (sent_at = ? AND id < ?))",
+                [Value::Integer(sent_at), Value::Integer(sent_at), Value::Integer(id)],
             );
-            let mut messages: Vec<Message> = conn
+        }
+        if let Some(after) = after {
+            filter.add("id > ?", [Value::Integer(after)]);
+        }
+        Ok(Self { polling: after.is_some(), limit })
+    }
+
+    /// Returns the rows, newest first, and the cursor for the next page.
+    fn fetch<T>(
+        &self,
+        conn: &Connection,
+        columns: &str,
+        table: &str,
+        filter: &Filter,
+        from_row: fn(&Row<'_>) -> rusqlite::Result<T>,
+        key: fn(&T) -> (i64, i64),
+    ) -> rusqlite::Result<(Vec<T>, Option<String>)> {
+        let limit = self.limit;
+        if self.polling {
+            // The oldest new rows first when there are more than `limit`, so
+            // repeated polls never skip any.
+            let sql = format!("SELECT {columns} FROM {table} {} ORDER BY id LIMIT {limit}", filter.sql());
+            let mut rows: Vec<T> = conn
                 .prepare(&sql)?
-                .query_map(params_from_iter(&filter.args), message_from_row)?
+                .query_map(params_from_iter(&filter.args), from_row)?
                 .collect::<Result<_, _>>()?;
-            messages.reverse();
-            return Ok(MessagePage { messages, next: None });
+            rows.reverse();
+            return Ok((rows, None));
         }
 
         let sql = format!(
-            "SELECT {MESSAGE_COLUMNS} FROM messages {} ORDER BY sent_at DESC, id DESC LIMIT {}",
+            "SELECT {columns} FROM {table} {} ORDER BY sent_at DESC, id DESC LIMIT {}",
             filter.sql(),
             limit + 1
         );
-        let mut stmt = conn.prepare(&sql)?;
-        let mut messages: Vec<Message> = stmt
-            .query_map(params_from_iter(&filter.args), message_from_row)?
+        let mut rows: Vec<T> = conn
+            .prepare(&sql)?
+            .query_map(params_from_iter(&filter.args), from_row)?
             .collect::<Result<_, _>>()?;
-        let next = if messages.len() > limit {
-            messages.truncate(limit);
-            messages.last().map(|m| format!("{}:{}", m.sent_at, m.id))
+        let next = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last().map(|r| {
+                let (sent_at, id) = key(r);
+                format!("{sent_at}:{id}")
+            })
         } else {
             None
         };
-        Ok(MessagePage { messages, next })
+        Ok((rows, next))
+    }
+}
+
+#[derive(Serialize)]
+struct Event {
+    id: i64,
+    channel: String,
+    user_id: Option<String>,
+    login: String,
+    display_name: String,
+    color: Option<String>,
+    kind: String,
+    tier: Option<String>,
+    months: Option<i64>,
+    count: Option<i64>,
+    recipient_login: Option<String>,
+    recipient_display_name: Option<String>,
+    system_text: String,
+    text: Option<String>,
+    sent_at: i64,
+}
+
+const EVENT_COLUMNS: &str = "id, channel, user_id, login, display_name, color, kind, tier, months, count,
+    recipient_login, recipient_display_name, system_text, text, sent_at";
+
+fn event_from_row(r: &Row<'_>) -> rusqlite::Result<Event> {
+    Ok(Event {
+        id: r.get(0)?,
+        channel: r.get(1)?,
+        user_id: r.get(2)?,
+        login: r.get(3)?,
+        display_name: r.get(4)?,
+        color: r.get(5)?,
+        kind: r.get(6)?,
+        tier: r.get(7)?,
+        months: r.get(8)?,
+        count: r.get(9)?,
+        recipient_login: r.get(10)?,
+        recipient_display_name: r.get(11)?,
+        system_text: r.get(12)?,
+        text: r.get(13)?,
+        sent_at: r.get(14)?,
+    })
+}
+
+#[derive(Deserialize)]
+struct EventsParams {
+    user_id: Option<String>,
+    /// Comma-separated `kind`s, e.g. `sub,resub,subgift`.
+    kinds: Option<String>,
+    before: Option<String>,
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct EventPage {
+    events: Vec<Event>,
+    next: Option<String>,
+}
+
+/// Subs, raids and other events, paginated like `/messages`. Single gifts
+/// from a gift bomb are left out; its `submysterygift` event stands for them.
+async fn events(
+    State(db): State<Arc<Db>>,
+    Query(range): Query<RangeParams>,
+    Query(p): Query<EventsParams>,
+) -> ApiResult<EventPage> {
+    let limit = p.limit.unwrap_or(100).clamp(1, 500);
+    let mut filter = Filter::range(&range);
+    filter.add("bulk_gift = 0", []);
+    if let Some(user_id) = non_empty(&p.user_id) {
+        filter.add("user_id = ?", [Value::Text(user_id.to_string())]);
+    }
+    if let Some(kinds) = non_empty(&p.kinds) {
+        let kinds: Vec<Value> = kinds.split(',').map(|k| Value::Text(k.trim().to_string())).collect();
+        let placeholders = vec!["?"; kinds.len()].join(", ");
+        filter.add(&format!("kind IN ({placeholders})"), kinds);
+    }
+    let page = PageParams::new(&mut filter, &p.before, p.after, limit)?;
+    db.query(move |conn| {
+        let (events, next) = page.fetch(conn, EVENT_COLUMNS, "events", &filter, event_from_row, |e| {
+            (e.sent_at, e.id)
+        })?;
+        Ok(EventPage { events, next })
     })
     .await
     .map(Json)

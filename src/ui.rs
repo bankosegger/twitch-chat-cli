@@ -5,8 +5,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, ConnStatus, StreamPanel};
-use crate::irc::ChatMessage;
+use crate::app::{App, ChatItem, ConnStatus, StreamPanel};
+use crate::irc::{ChatMessage, UserNotice};
 
 const NAME_PALETTE: [(u8, u8, u8); 15] = [
     (255, 0, 0),
@@ -42,6 +42,7 @@ fn name_color(name: &str) -> (u8, u8, u8) {
 
 const MOD_HIGHLIGHT_BG: Color = Color::Rgb(20, 60, 30);
 const SUB_HIGHLIGHT_BG: Color = Color::Rgb(55, 25, 65);
+const EVENT_BG: Color = Color::Rgb(30, 22, 45);
 
 fn is_mod(msg: &ChatMessage) -> bool {
     msg.badges.iter().any(|b| b == "MOD" || b == "BROADCASTER")
@@ -172,8 +173,47 @@ fn wrap_tokens(tokens: Vec<Token>, width: usize) -> Vec<Vec<Token>> {
     lines
 }
 
-fn message_to_lines(msg: &ChatMessage, width: usize, bg: Option<Color>) -> Vec<Line<'static>> {
-    let tokens = build_tokens(msg, bg);
+/// Events read like Twitch's own: its description, then the user's message.
+fn event_tokens(event: &UserNotice) -> Vec<Token> {
+    let (icon, accent) = match event.kind.as_str() {
+        "raid" => ("⚑", Color::Rgb(255, 140, 60)),
+        _ if event.is_sub() || event.kind == "submysterygift" => ("★", Color::Rgb(190, 140, 255)),
+        _ => ("•", Color::Cyan),
+    };
+    let style = |fg: Color| Style::default().fg(fg).bg(EVENT_BG);
+    let mut tokens = vec![Token {
+        text: icon.to_string(),
+        style: style(accent),
+    }];
+    let description = if event.system_text.is_empty() {
+        format!("{}:", event.display_name)
+    } else {
+        event.system_text.clone()
+    };
+    tokens.extend(description.split_whitespace().map(|word| Token {
+        text: word.to_string(),
+        style: style(accent).add_modifier(Modifier::BOLD),
+    }));
+    if let Some(text) = &event.text {
+        tokens.extend(text.split_whitespace().map(|word| Token {
+            text: word.to_string(),
+            style: style(Color::White),
+        }));
+    }
+    tokens
+}
+
+fn item_to_lines(item: &ChatItem, width: usize, app: &App) -> Vec<Line<'static>> {
+    match item {
+        ChatItem::Message(msg) => {
+            let bg = highlight_bg(msg, app);
+            tokens_to_lines(build_tokens(msg, bg), width, bg)
+        }
+        ChatItem::Event(event) => tokens_to_lines(event_tokens(event), width, Some(EVENT_BG)),
+    }
+}
+
+fn tokens_to_lines(tokens: Vec<Token>, width: usize, bg: Option<Color>) -> Vec<Line<'static>> {
     let wrapped = wrap_tokens(tokens, width);
     let space_style = match bg {
         Some(color) => Style::default().bg(color),
@@ -255,15 +295,21 @@ fn stream_panel(app: &App) -> Paragraph<'static> {
         ),
     };
 
-    let mods_line = if app.mods_seen.is_empty() {
-        Line::from(Span::styled("Mods seen chatting: (none yet)", dim))
+    let mut mods_line = vec![
+        Span::styled("Subs since opened: ", dim),
+        Span::styled(
+            app.subs_seen.to_string(),
+            Style::default().fg(Color::Rgb(190, 140, 255)).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   Mods seen chatting: ", dim),
+    ];
+    if app.mods_seen.is_empty() {
+        mods_line.push(Span::styled("(none yet)", dim));
     } else {
         let names = app.mods_seen.iter().cloned().collect::<Vec<_>>().join(", ");
-        Line::from(vec![
-            Span::styled("Mods seen chatting: ", dim),
-            Span::styled(names, Style::default().fg(Color::Rgb(60, 200, 110))),
-        ])
-    };
+        mods_line.push(Span::styled(names, Style::default().fg(Color::Rgb(60, 200, 110))));
+    }
+    let mods_line = Line::from(mods_line);
 
     Paragraph::new(vec![line1, line2, mods_line])
         .block(Block::default().borders(Borders::ALL).title(" stream "))
@@ -298,7 +344,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let width = inner.width as usize;
     let viewport = inner.height as usize;
 
-    let matched: Vec<&ChatMessage> = app.messages.iter().filter(|m| app.message_matches(m)).collect();
+    let matched: Vec<&ChatItem> = app.messages.iter().filter(|m| app.message_matches(m)).collect();
 
     let mut all_lines: Vec<Line<'static>> = Vec::new();
     if matched.is_empty() && !effective_filter.is_empty() {
@@ -307,8 +353,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        for msg in &matched {
-            all_lines.extend(message_to_lines(msg, width, highlight_bg(msg, app)));
+        for item in &matched {
+            all_lines.extend(item_to_lines(item, width, app));
         }
     }
 

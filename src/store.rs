@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::irc::ChatMessage;
+use crate::irc::{ChatMessage, UserNotice};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
@@ -23,6 +23,31 @@ CREATE INDEX IF NOT EXISTS messages_channel_sent_at ON messages (channel, sent_a
 CREATE INDEX IF NOT EXISTS messages_user_id ON messages (user_id);
 CREATE INDEX IF NOT EXISTS messages_login ON messages (login);
 CREATE INDEX IF NOT EXISTS messages_sent_at ON messages (sent_at);
+
+-- Subs, resubs, gifted subs, raids, announcements, ... (IRC USERNOTICEs).
+CREATE TABLE IF NOT EXISTS events (
+    id                     INTEGER PRIMARY KEY,
+    msg_id                 TEXT UNIQUE,
+    channel                TEXT NOT NULL,
+    room_id                TEXT,
+    user_id                TEXT,
+    login                  TEXT NOT NULL,
+    display_name           TEXT NOT NULL,
+    color                  TEXT,
+    kind                   TEXT NOT NULL,
+    tier                   TEXT,
+    months                 INTEGER,
+    count                  INTEGER,
+    recipient_login        TEXT,
+    recipient_display_name TEXT,
+    bulk_gift              INTEGER NOT NULL DEFAULT 0,
+    system_text            TEXT NOT NULL,
+    text                   TEXT,
+    sent_at                INTEGER NOT NULL,
+    received_at            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_channel_sent_at ON events (channel, sent_at);
+CREATE INDEX IF NOT EXISTS events_sent_at ON events (sent_at);
 
 -- Channels the recorder should be in. `pinned` rows come from the recorder's
 -- command line and are rewritten on every start; the rest are added and
@@ -90,11 +115,50 @@ impl Store {
                     msg.user_id,
                     msg.login,
                     msg.display_name,
-                    msg.color.map(|(r, g, b)| format!("#{r:02X}{g:02X}{b:02X}")),
+                    msg.color.map(hex_color),
                     msg.badges_raw,
                     msg.text,
                     msg.sent_at,
                     msg.received_at,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// Like `insert_batch`, for subs, raids and other events.
+    pub fn insert_events(&mut self, events: &[UserNotice]) -> rusqlite::Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut inserted = 0;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO events
+                    (msg_id, channel, room_id, user_id, login, display_name, color,
+                     kind, tier, months, count, recipient_login, recipient_display_name,
+                     bulk_gift, system_text, text, sent_at, received_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            )?;
+            for e in events {
+                inserted += stmt.execute(params![
+                    e.id,
+                    e.channel,
+                    e.room_id,
+                    e.user_id,
+                    e.login,
+                    e.display_name,
+                    e.color.map(hex_color),
+                    e.kind,
+                    e.tier,
+                    e.months,
+                    e.count,
+                    e.recipient_login,
+                    e.recipient_display_name,
+                    e.bulk_gift,
+                    e.system_text,
+                    e.text,
+                    e.sent_at,
+                    e.received_at,
                 ])?;
             }
         }
@@ -168,6 +232,10 @@ pub fn normalize_channel(input: &str) -> Option<String> {
     let valid = (1..=25).contains(&name.len())
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
     valid.then_some(name)
+}
+
+fn hex_color((r, g, b): (u8, u8, u8)) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 fn now_millis() -> i64 {
@@ -259,6 +327,33 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(hits, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn duplicate_events_are_ignored() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let event = UserNotice {
+            id: Some("e".into()),
+            channel: "somechannel".into(),
+            room_id: None,
+            user_id: Some("2".into()),
+            login: "someone".into(),
+            display_name: "Someone".into(),
+            color: None,
+            kind: "resub".into(),
+            tier: Some("1000".into()),
+            months: Some(3),
+            count: None,
+            recipient_login: None,
+            recipient_display_name: None,
+            bulk_gift: false,
+            system_text: "Someone subscribed at Tier 1.".into(),
+            text: None,
+            sent_at: 1_700_000_000_000,
+            received_at: 1_700_000_000_050,
+        };
+        assert_eq!(store.insert_events(&[event.clone(), event.clone()]).unwrap(), 1);
+        assert_eq!(store.insert_events(&[event]).unwrap(), 0);
     }
 
     #[test]

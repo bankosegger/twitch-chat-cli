@@ -201,13 +201,40 @@ function messageRow(m, { showChannel = false, focus = false } = {}) {
   );
 }
 
+/** Events that give or extend a sub, and how they're marked. */
+const SUB_KINDS = ["sub", "resub", "subgift", "submysterygift", "giftpaidupgrade", "primepaidupgrade", "anongiftpaidupgrade"];
+const eventIcon = (kind) => (kind === "raid" ? "⚑︎" : SUB_KINDS.includes(kind) ? "★︎" : "•");
+
+/** A sub, raid or other event, worded like Twitch's own notice. */
+function eventRow(e, { showChannel = false } = {}) {
+  const userHref = e.user_id ? href(`/u/${encodeURIComponent(e.user_id)}`) : href("/search", { login: e.login });
+  const name = el("a", { class: "name", href: userHref }, e.display_name);
+  name.style.color = nameColor(e.color, e.login);
+  // Twitch's text starts with the name; show it as the link instead.
+  let description = e.system_text;
+  const lead = [e.display_name, e.login].find((n) => description.toLowerCase().startsWith(n.toLowerCase()));
+  if (lead) description = description.slice(lead.length);
+  else if (description) description = ` · ${description}`;
+  return el(
+    "li",
+    { class: `msg event${e.kind === "raid" ? " event-raid" : SUB_KINDS.includes(e.kind) ? " event-sub" : ""}`, "data-id": e.id },
+    el("span", { class: "time", title: fmtDateTime(e.sent_at) }, fmtMessageTime(e.sent_at)),
+    showChannel ? el("a", { class: "channel", href: href(`/c/${e.channel}`) }, `#${e.channel}`) : null,
+    el("span", { class: "event-icon", "aria-hidden": "true" }, eventIcon(e.kind)),
+    name,
+    el("span", { class: "event-text" }, description),
+    e.text ? el("span", { class: "event-message" }, e.text) : null,
+  );
+}
+
 const LIVE_POLL_MS = 2000;
 
 /**
  * A message list that loads older pages on demand. `live()` starts polling for
  * new messages, adding them at the top, and returns a function that stops it.
+ * `source` switches it to another paged endpoint, such as events.
  */
-function pagedMessages(params, { showChannel = false, emptyText = "No messages." } = {}) {
+function pagedMessages(params, { showChannel = false, emptyText = "No messages.", source = MESSAGES } = {}) {
   const list = el("ul", { class: "messages" });
   const footer = el("div", { class: "more" });
   const root = el("div", {}, list, footer);
@@ -216,23 +243,25 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
   async function load(before) {
     footer.replaceChildren(el("span", { class: "muted" }, "Loading…"));
     try {
-      const page = await api("/messages", { ...params, before });
-      for (const m of page.messages) newestId = Math.max(newestId, m.id);
-      list.append(...page.messages.map((m) => messageRow(m, { showChannel })));
+      const page = await api(source.path, { ...params, before });
+      const items = page[source.key];
+      for (const m of items) newestId = Math.max(newestId, m.id);
+      list.append(...items.map((m) => source.row(m, { showChannel })));
       footer.replaceChildren();
       if (!list.children.length) footer.append(el("p", { class: "muted" }, emptyText));
-      if (page.next) footer.append(el("button", { class: "secondary", onclick: () => load(page.next) }, "Load older messages"));
+      if (page.next) footer.append(el("button", { class: "secondary", onclick: () => load(page.next) }, `Load older ${source.key}`));
     } catch (e) {
-      footer.replaceChildren(el("p", { class: "error" }, `Failed to load messages: ${e.message}`));
+      footer.replaceChildren(el("p", { class: "error" }, `Failed to load ${source.key}: ${e.message}`));
     }
   }
 
   async function poll() {
-    const page = await api("/messages", { ...params, after: newestId, limit: 200 });
-    if (!page.messages.length) return;
-    newestId = Math.max(newestId, ...page.messages.map((m) => m.id));
-    const rows = page.messages.map((m) => {
-      const row = messageRow(m, { showChannel });
+    const page = await api(source.path, { ...params, after: newestId, limit: 200 });
+    const items = page[source.key];
+    if (!items.length) return;
+    newestId = Math.max(newestId, ...items.map((m) => m.id));
+    const rows = items.map((m) => {
+      const row = source.row(m, { showChannel });
       row.classList.add("new");
       return row;
     });
@@ -260,6 +289,9 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
   const ready = load(null);
   return { root, ready, live };
 }
+
+const MESSAGES = { path: "/messages", key: "messages", row: messageRow };
+const EVENTS = { path: "/events", key: "events", row: eventRow };
 
 function liveBadge() {
   return el("span", { class: "live", role: "img", "aria-label": "Live", title: "Live: new messages appear automatically" });
@@ -676,6 +708,11 @@ async function viewChannel(channel, params) {
 
   const chartBox = el("div", { class: "chart" });
   const latest = pagedMessages({ channel, limit: 50 });
+  const events = pagedMessages(
+    { channel, from, limit: 30 },
+    { source: EVENTS, emptyText: `No subs or raids in the last ${range.label}. Only events that happen while the recorder runs are captured.` },
+  );
+  const subsTotal = stats.subs + stats.gift_subs;
 
   const view = el(
     "div",
@@ -687,8 +724,10 @@ async function viewChannel(channel, params) {
       statTile("Messages", fmtCompact(stats.messages), `${fmtInt(stats.messages)} total`),
       statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each on average`),
       statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
+      statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.subs)} subbed · ${fmtInt(stats.gift_subs)} gifted`),
     ),
     panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
+    panel("events", ["Subs & events", liveBadge()], events.root),
     el(
       "div",
       { class: "grid-2" },
@@ -703,9 +742,11 @@ async function viewChannel(channel, params) {
       onSelect: (p) => (location.hash = href("/search", { channel, from: p.t, to: p.t + bucket.ms })),
     });
     const stopLive = latest.live();
+    const stopEvents = events.live();
     return () => {
       stopChart();
       stopLive();
+      stopEvents();
     };
   };
   return view;

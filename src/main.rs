@@ -179,6 +179,10 @@ async fn run(
                         app.push_message(msg);
                         dirty = true;
                     }
+                    Some(ChatEvent::UserNotice(event)) => {
+                        app.push_event(event);
+                        dirty = true;
+                    }
                     Some(ChatEvent::Connecting) => {
                         app.status = app::ConnStatus::Connecting;
                         dirty = true;

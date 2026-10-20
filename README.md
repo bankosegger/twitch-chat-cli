@@ -10,6 +10,7 @@ Connects to a channel's chat over IRC and displays it in a scrollable terminal U
 - Scrollable message history
 - Message filtering (search-as-you-type)
 - Highlight moderators / subscribers
+- Subs, resubs, gifted subs, raids and announcements shown inline as they happen
 - Headless `record` mode that stores chat from many channels in SQLite
 - Web UI (`serve`) with dashboards, full-text search and user history
 - Optional stream status (online/offline, title, category, viewers) when API credentials are provided
@@ -24,7 +25,7 @@ cargo run --release -- <channel>
 
 ## Recording chat to a database
 
-`record` runs headless (no terminal UI) and stores every chat message from one or more channels in a SQLite database. It is meant to run unattended on a server:
+`record` runs headless (no terminal UI) and stores every chat message and event (subs, raids, ...) from one or more channels in a SQLite database. It is meant to run unattended on a server:
 
 ```sh
 twitch-chat record --db chat.db papaplatte xqc
@@ -35,7 +36,7 @@ twitch-chat record --db chat.db papaplatte xqc
 - Each message's Twitch id is stored with a unique constraint, so duplicates are skipped.
 - It reconnects automatically. Messages sent while disconnected are lost, because Twitch IRC has no replay.
 - `Ctrl+C` / `SIGTERM` flush pending messages before exiting.
-- A line like `stored 412 message(s) in the last 60s` is logged to stderr every minute.
+- A line like `stored 412 message(s) and 3 event(s) in the last 60s` is logged to stderr every minute.
 
 Schema (timestamps are Unix milliseconds):
 
@@ -53,6 +54,30 @@ CREATE TABLE messages (
     text         TEXT NOT NULL,
     sent_at      INTEGER NOT NULL,
     received_at  INTEGER NOT NULL
+);
+
+-- Subs, raids, announcements, watch streaks, ... (IRC USERNOTICEs).
+-- Only events that happen while the recorder runs are captured.
+CREATE TABLE events (
+    id                     INTEGER PRIMARY KEY,
+    msg_id                 TEXT UNIQUE,
+    channel                TEXT NOT NULL,
+    room_id                TEXT,
+    user_id                TEXT,    -- who triggered it: subscriber, gifter, raider
+    login                  TEXT NOT NULL,
+    display_name           TEXT NOT NULL,
+    color                  TEXT,
+    kind                   TEXT NOT NULL, -- 'sub', 'resub', 'subgift', 'submysterygift', 'raid', 'announcement', ...
+    tier                   TEXT,    -- 'Prime', '1000', '2000', '3000'
+    months                 INTEGER, -- cumulative months (the recipient's, for gifts)
+    count                  INTEGER, -- subs in a gift bomb, or viewers in a raid
+    recipient_login        TEXT,
+    recipient_display_name TEXT,
+    bulk_gift              INTEGER NOT NULL, -- 1 for each single gift of a gift bomb
+    system_text            TEXT NOT NULL,    -- Twitch's wording, e.g. 'X subscribed at Tier 1.'
+    text                   TEXT,             -- the user's attached message
+    sent_at                INTEGER NOT NULL,
+    received_at            INTEGER NOT NULL
 );
 ```
 
@@ -73,7 +98,7 @@ twitch-chat serve --db chat.db --bind 0.0.0.0:8080   # reachable from other mach
 ```
 
 - **Channels**: every recorded channel, its message count and when the last message arrived. The **Recording** panel adds or removes channels for the recorder (it accepts a name, `#name` or a twitch.tv link).
-- **Channel dashboard**: messages over time, unique chatters, busiest period, top chatters and most repeated messages, for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment.
+- **Channel dashboard**: messages over time, unique chatters, busiest period, sub count, a live list of subs, raids and other events, top chatters and most repeated messages, for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment.
 - **Search**: full-text search across all messages, filterable by channel and user. Every word must appear, and words match as prefixes (`kek` finds `KEKW`).
 - **Context**: click a message's timestamp to see the conversation around it
 - **Users**: a chatter's message history, the names they used, and the channels they chat in

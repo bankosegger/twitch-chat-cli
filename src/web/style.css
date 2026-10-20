@@ -323,5 +323,13 @@ details.data-table .scroll { max-height: 280px; overflow: auto; margin-top: 6px;
 .badge-staff { background: #000; }
 .more { margin-top: 8px; }
 
+/* Subs, raids and other events */
+.msg.event { --event: #22d3ee; box-shadow: inset 2px 0 var(--event); }
+.msg.event-sub { --event: #a78bfa; }
+.msg.event-raid { --event: #fb923c; }
+.event-icon { color: var(--event); margin-right: 4px; }
+.event-text { color: var(--text-secondary); }
+.event-message { display: block; padding-left: 16px; color: var(--text-primary); }
+
 .empty { padding: 24px; text-align: center; color: var(--text-secondary); }
 .empty code { background: var(--wash); padding: 1px 5px; border-radius: var(--radius); }

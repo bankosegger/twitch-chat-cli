@@ -42,12 +42,52 @@ pub struct ChatMessage {
     pub received_at: i64,
 }
 
+/// A `USERNOTICE`: a sub, resub, gifted sub, raid, announcement, etc.
+#[derive(Debug, Clone)]
+pub struct UserNotice {
+    pub id: Option<String>,
+    pub channel: String,
+    pub room_id: Option<String>,
+    /// The user who triggered the event (the gifter, for gifts; the raider, for raids).
+    pub user_id: Option<String>,
+    pub login: String,
+    pub display_name: String,
+    pub color: Option<(u8, u8, u8)>,
+    /// The `msg-id` tag: `sub`, `resub`, `subgift`, `submysterygift`, `raid`, ...
+    pub kind: String,
+    /// `Prime`, `1000`, `2000` or `3000`, for sub events.
+    pub tier: Option<String>,
+    /// Cumulative months subscribed (the recipient's, for a gift).
+    pub months: Option<i64>,
+    /// Subs in a gift bomb (`submysterygift`), or viewers in a raid.
+    pub count: Option<i64>,
+    pub recipient_login: Option<String>,
+    pub recipient_display_name: Option<String>,
+    /// A single gift that is part of a gift bomb, which has its own
+    /// `submysterygift` notice announcing the total.
+    pub bulk_gift: bool,
+    /// Twitch's ready-made description, e.g. "X subscribed at Tier 1.".
+    pub system_text: String,
+    /// The message the user attached (resub message, announcement text).
+    pub text: Option<String>,
+    pub sent_at: i64,
+    pub received_at: i64,
+}
+
+impl UserNotice {
+    /// A new, renewed or gifted subscription.
+    pub fn is_sub(&self) -> bool {
+        matches!(self.kind.as_str(), "sub" | "resub" | "subgift")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
     Connecting,
     Connected,
     Disconnected(String),
     Message(ChatMessage),
+    UserNotice(UserNotice),
     SystemNotice(String),
 }
 
@@ -199,6 +239,52 @@ fn build_message(parsed: &IrcLine<'_>) -> ChatMessage {
     }
 }
 
+fn build_user_notice(parsed: &IrcLine<'_>) -> Option<UserNotice> {
+    let tag = |key: &str| parsed.tags.get(key).cloned().filter(|s| !s.is_empty());
+    let number = |key: &str| tag(key).and_then(|v| v.parse::<i64>().ok()).filter(|&n| n > 0);
+
+    let kind = tag("msg-id")?;
+    let received_at = now_millis();
+    // The prefix is the server here, so the user comes from the `login` tag.
+    let login = tag("login").unwrap_or_else(|| "unknown".to_string());
+    let display_name = tag("display-name").unwrap_or_else(|| login.clone());
+    let (months, count) = match kind.as_str() {
+        "sub" | "resub" => (number("msg-param-cumulative-months"), None),
+        "subgift" => (number("msg-param-months"), None),
+        "submysterygift" => (None, number("msg-param-mass-gift-count")),
+        "raid" => (None, number("msg-param-viewerCount")),
+        _ => (None, None),
+    };
+
+    Some(UserNotice {
+        id: tag("id"),
+        channel: parsed
+            .params
+            .first()
+            .map(|c| c.trim_start_matches('#').to_lowercase())
+            .unwrap_or_default(),
+        room_id: tag("room-id"),
+        user_id: tag("user-id"),
+        login,
+        display_name,
+        color: tag("color").and_then(|c| parse_color(&c)),
+        tier: tag("msg-param-sub-plan"),
+        months,
+        count,
+        recipient_login: tag("msg-param-recipient-user-name"),
+        recipient_display_name: tag("msg-param-recipient-display-name"),
+        bulk_gift: kind == "subgift" && tag("msg-param-community-gift-id").is_some(),
+        system_text: tag("system-msg").unwrap_or_default(),
+        // Only the channel when there is no attached message.
+        text: parsed.params.get(1).map(|t| t.to_string()).filter(|t| !t.trim().is_empty()),
+        kind,
+        sent_at: tag("tmi-sent-ts")
+            .and_then(|ts| ts.parse().ok())
+            .unwrap_or(received_at),
+        received_at,
+    })
+}
+
 /// Stays connected to Twitch chat, in whichever channels `channels` currently
 /// holds: changes are applied to the live connection with JOIN/PART, and the
 /// latest list is re-joined after every reconnect.
@@ -341,6 +427,11 @@ async fn connect_and_read(
                 "PRIVMSG" => {
                     let _ = tx.send(ChatEvent::Message(build_message(&parsed))).await;
                 }
+                "USERNOTICE" => {
+                    if let Some(notice) = build_user_notice(&parsed) {
+                        let _ = tx.send(ChatEvent::UserNotice(notice)).await;
+                    }
+                }
                 "NOTICE" => {
                     let text = parsed.params.last().copied().unwrap_or("").to_string();
                     let _ = tx.send(ChatEvent::SystemNotice(text)).await;
@@ -351,5 +442,70 @@ async fn connect_and_read(
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notice(line: &str) -> UserNotice {
+        build_user_notice(&parse_line(line).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn parses_resub() {
+        let n = notice(
+            concat!(
+                r"@badges=subscriber/12;color=#FF0010;display-name=Someone;id=abc;login=someone;msg-id=resub;",
+                r"msg-param-cumulative-months=12;msg-param-sub-plan=1000;room-id=1;",
+                r"system-msg=Someone\ssubscribed\sat\sTier\s1.;tmi-sent-ts=1700000000000;user-id=2",
+                r" :tmi.twitch.tv USERNOTICE #SomeChannel :a whole year!",
+            ),
+        );
+        assert_eq!(n.kind, "resub");
+        assert_eq!(n.channel, "somechannel");
+        assert_eq!(n.login, "someone");
+        assert_eq!(n.months, Some(12));
+        assert_eq!(n.tier.as_deref(), Some("1000"));
+        assert_eq!(n.system_text, "Someone subscribed at Tier 1.");
+        assert_eq!(n.text.as_deref(), Some("a whole year!"));
+        assert_eq!(n.sent_at, 1_700_000_000_000);
+        assert!(n.is_sub());
+    }
+
+    #[test]
+    fn parses_gift_bomb() {
+        let bomb = notice(
+            concat!(
+                r"@display-name=Gifter;login=gifter;msg-id=submysterygift;msg-param-mass-gift-count=5;",
+                r"msg-param-community-gift-id=99;msg-param-sub-plan=1000;system-msg=Gifter\sis\sgifting\s5\ssubs",
+                r" :tmi.twitch.tv USERNOTICE #chan",
+            ),
+        );
+        assert_eq!(bomb.count, Some(5));
+        assert_eq!(bomb.text, None);
+        assert!(!bomb.is_sub(), "the gifts are counted individually");
+
+        let gift = notice(
+            concat!(
+                "@display-name=Gifter;login=gifter;msg-id=subgift;msg-param-community-gift-id=99;",
+                "msg-param-recipient-user-name=lucky;msg-param-recipient-display-name=Lucky;msg-param-months=3",
+                " :tmi.twitch.tv USERNOTICE #chan",
+            ),
+        );
+        assert!(gift.bulk_gift);
+        assert_eq!(gift.recipient_display_name.as_deref(), Some("Lucky"));
+        assert_eq!(gift.months, Some(3));
+        assert!(gift.is_sub());
+    }
+
+    #[test]
+    fn parses_raid() {
+        let n = notice(
+            "@display-name=Raider;login=raider;msg-id=raid;msg-param-viewerCount=1234 :tmi.twitch.tv USERNOTICE #chan",
+        );
+        assert_eq!(n.kind, "raid");
+        assert_eq!(n.count, Some(1234));
     }
 }

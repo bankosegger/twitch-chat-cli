@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
-use crate::irc::{self, ChatEvent, ChatMessage};
+use crate::irc::{self, ChatEvent, ChatMessage, UserNotice};
 use crate::store::{self, Store};
 
 /// Flush to the database once this many messages are pending...
@@ -18,7 +18,20 @@ const CHANNELS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Bounded so a stalled database applies backpressure instead of growing memory.
 const QUEUE_CAPACITY: usize = 10_000;
 
-/// Headless mode: joins `channels` and writes every chat message to SQLite
+/// Messages and events received since the last flush.
+#[derive(Default)]
+struct Pending {
+    messages: Vec<ChatMessage>,
+    events: Vec<UserNotice>,
+}
+
+impl Pending {
+    fn len(&self) -> usize {
+        self.messages.len() + self.events.len()
+    }
+}
+
+/// Headless mode: joins `channels` and writes every chat message and event to SQLite
 /// until interrupted (Ctrl+C / SIGTERM).
 pub async fn run(pinned: Vec<String>, db_path: &Path) -> io::Result<()> {
     let mut store = Store::open(db_path).map_err(io::Error::other)?;
@@ -40,8 +53,8 @@ pub async fn run(pinned: Vec<String>, db_path: &Path) -> io::Result<()> {
     let (tx, mut rx) = mpsc::channel::<ChatEvent>(QUEUE_CAPACITY);
     tokio::spawn(irc::run(channels_rx, tx));
 
-    let mut pending: Vec<ChatMessage> = Vec::with_capacity(BATCH_SIZE);
-    let mut stored_since_stats = 0usize;
+    let mut pending = Pending::default();
+    let mut stored_since_stats = Stored::default();
     let mut flush_tick = tokio::time::interval(FLUSH_INTERVAL);
     let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
     stats_tick.tick().await;
@@ -54,25 +67,27 @@ pub async fn run(pinned: Vec<String>, db_path: &Path) -> io::Result<()> {
         tokio::select! {
             maybe_event = rx.recv() => {
                 match maybe_event {
-                    Some(ChatEvent::Message(msg)) => {
-                        pending.push(msg);
-                        if pending.len() >= BATCH_SIZE {
-                            stored_since_stats += flush(&mut store, &mut pending);
-                        }
-                    }
+                    Some(ChatEvent::Message(msg)) => pending.messages.push(msg),
+                    Some(ChatEvent::UserNotice(event)) => pending.events.push(event),
                     Some(ChatEvent::Connecting) => eprintln!("connecting..."),
                     Some(ChatEvent::Connected) => eprintln!("connected"),
                     Some(ChatEvent::Disconnected(reason)) => eprintln!("disconnected: {reason}"),
                     Some(ChatEvent::SystemNotice(notice)) => eprintln!("notice: {notice}"),
                     None => break,
                 }
+                if pending.len() >= BATCH_SIZE {
+                    stored_since_stats.add(flush(&mut store, &mut pending));
+                }
             }
             _ = flush_tick.tick() => {
-                stored_since_stats += flush(&mut store, &mut pending);
+                stored_since_stats.add(flush(&mut store, &mut pending));
             }
             _ = stats_tick.tick() => {
-                eprintln!("stored {stored_since_stats} message(s) in the last {}s", STATS_INTERVAL.as_secs());
-                stored_since_stats = 0;
+                let Stored { messages, events } = std::mem::take(&mut stored_since_stats);
+                eprintln!(
+                    "stored {messages} message(s) and {events} event(s) in the last {}s",
+                    STATS_INTERVAL.as_secs()
+                );
             }
             _ = channels_tick.tick() => {
                 // Picks up channels added or removed in the web dashboard.
@@ -114,19 +129,40 @@ fn log_changes(old: &[String], new: &[String]) {
     log_channels(new);
 }
 
+/// Rows actually inserted.
+#[derive(Default)]
+struct Stored {
+    messages: usize,
+    events: usize,
+}
+
+impl Stored {
+    fn add(&mut self, other: Stored) {
+        self.messages += other.messages;
+        self.events += other.events;
+    }
+}
+
 /// Writes and clears `pending`, returning how many rows were inserted. On a
 /// database error the batch is logged and dropped so recording can continue.
-fn flush(store: &mut Store, pending: &mut Vec<ChatMessage>) -> usize {
+fn flush(store: &mut Store, pending: &mut Pending) -> Stored {
+    Stored {
+        messages: insert_all(&mut pending.messages, "message", |batch| store.insert_batch(batch)),
+        events: insert_all(&mut pending.events, "event", |batch| store.insert_events(batch)),
+    }
+}
+
+fn insert_all<T>(pending: &mut Vec<T>, noun: &str, insert: impl FnOnce(&[T]) -> rusqlite::Result<usize>) -> usize {
     if pending.is_empty() {
         return 0;
     }
-    let result = tokio::task::block_in_place(|| store.insert_batch(pending));
+    let result = tokio::task::block_in_place(|| insert(pending));
     let count = pending.len();
     pending.clear();
     match result {
         Ok(inserted) => inserted,
         Err(e) => {
-            eprintln!("failed to store {count} message(s): {e}");
+            eprintln!("failed to store {count} {noun}(s): {e}");
             0
         }
     }
