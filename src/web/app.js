@@ -504,6 +504,59 @@ function panel(key, title, ...children) {
   return node;
 }
 
+const SORT_KEY = "table-sort";
+const tableSorts = JSON.parse(localStorage.getItem(SORT_KEY) || "{}");
+
+/**
+ * A table whose rows reorder when a column header is clicked; clicking again
+ * reverses the order. Each column is `{ label, value, cell, num }`: `value(row)`
+ * is what it sorts by, `cell(row)` what it shows. Numbers sort largest first
+ * and text A–Z on the first click. The choice is remembered under `key`.
+ */
+function sortableTable(key, columns, rows, initial) {
+  let sort = tableSorts[key] && columns[tableSorts[key].col] ? tableSorts[key] : initial;
+  const headRow = el("tr");
+  const tbody = el("tbody");
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+  function draw() {
+    const col = columns[sort.col];
+    const dir = sort.desc ? -1 : 1;
+    const sorted = [...rows].sort((a, b) => {
+      const [x, y] = [col.value(a), col.value(b)];
+      return dir * (typeof x === "string" ? collator.compare(x, y) : x - y);
+    });
+    tbody.replaceChildren(...sorted.map((row) => el("tr", {}, columns.map((c) => el("td", { class: c.num ? "num" : null }, c.cell(row))))));
+    headRow.replaceChildren(
+      ...columns.map((c, i) => {
+        const active = i === sort.col;
+        return el(
+          "th",
+          { class: c.num ? "num" : null, "aria-sort": active ? (sort.desc ? "descending" : "ascending") : null },
+          el(
+            "button",
+            {
+              type: "button",
+              class: `sort${active ? " active" : ""}`,
+              onclick: () => {
+                sort = active ? { col: i, desc: !sort.desc } : { col: i, desc: typeof c.value(rows[0]) !== "string" };
+                tableSorts[key] = sort;
+                localStorage.setItem(SORT_KEY, JSON.stringify(tableSorts));
+                draw();
+              },
+            },
+            c.label,
+            el("span", { class: "sort-arrow", "aria-hidden": "true" }, active ? (sort.desc ? "↓" : "↑") : "↕"),
+          ),
+        );
+      }),
+    );
+  }
+
+  draw();
+  return el("table", { class: "sortable" }, el("thead", {}, headRow), tbody);
+}
+
 // ---------- views ----------
 
 /** Accepts `name`, `#name` or a twitch.tv link; the server validates the rest. */
@@ -639,24 +692,17 @@ async function viewOverview() {
     el(
       "div",
       { class: "card" },
-      el(
-        "table",
-        {},
-        el("thead", {}, el("tr", {}, el("th", {}, "Channel"), el("th", { class: "num" }, "Messages"), el("th", {}, "Recording since"), el("th", {}, "Last message"))),
-        el(
-          "tbody",
-          {},
-          channels.map((c) =>
-            el(
-              "tr",
-              {},
-              el("td", {}, el("a", { href: href(`/c/${c.channel}`) }, c.channel)),
-              el("td", { class: "num" }, fmtInt(c.messages)),
-              el("td", {}, fmtDateTime(c.first_at)),
-              el("td", { title: fmtDateTime(c.last_at) }, fmtAgo(c.last_at)),
-            ),
-          ),
-        ),
+      sortableTable(
+        "channels",
+        [
+          { label: "Channel", value: (c) => c.channel, cell: (c) => el("a", { href: href(`/c/${c.channel}`) }, c.channel) },
+          { label: "Messages", value: (c) => c.messages, cell: (c) => fmtInt(c.messages), num: true },
+          { label: "Recording since", value: (c) => c.first_at, cell: (c) => fmtDateTime(c.first_at) },
+          { label: "Last message", value: (c) => c.last_at, cell: (c) => el("span", { title: fmtDateTime(c.last_at) }, fmtAgo(c.last_at)) },
+        ],
+        channels,
+        // The server's order: most recently active first.
+        { col: 3, desc: true },
       ),
     ),
   );

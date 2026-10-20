@@ -201,6 +201,18 @@ th {
   border-bottom: 1px solid var(--border);
 }
 td { padding: 3px 6px; vertical-align: top; }
+/* Sortable headers look like the plain ones until hovered. */
+th button.sort {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+th button.sort:hover, th button.sort.active { color: var(--text-primary); }
+th button.sort:focus-visible { outline: 1px solid var(--text-secondary); outline-offset: 2px; }
+.sort-arrow { opacity: 0.4; font-size: 10px; }
+.sort.active .sort-arrow { opacity: 1; }
 tbody tr:hover td { background: var(--wash); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 td.text { overflow-wrap: anywhere; }
