@@ -914,9 +914,12 @@ async function viewUser(userId) {
   const user = await api(`/users/${encodeURIComponent(userId)}`);
   const current = user.names[0];
   const total = user.channels.reduce((sum, c) => sum + c.messages, 0);
+  const totalEvents = user.channels.reduce((sum, c) => sum + c.events, 0);
   const others = user.names.slice(1).filter((n) => n.login !== current.login || n.display_name !== current.display_name);
-  const messages = pagedMessages({ user_id: userId, limit: 100 }, { showChannel: user.channels.length > 1 });
-  await messages.ready;
+  const showChannel = user.channels.length > 1;
+  const messages = pagedMessages({ user_id: userId, limit: 100 }, { showChannel });
+  const events = totalEvents ? pagedMessages({ user_id: userId, limit: 30 }, { showChannel, source: EVENTS }) : null;
+  await Promise.all([messages.ready, events?.ready]);
 
   const view = el(
     "div",
@@ -941,7 +944,19 @@ async function viewUser(userId) {
       el(
         "table",
         {},
-        el("thead", {}, el("tr", {}, el("th", {}, "Channel"), el("th", { class: "num" }, "Messages"), el("th", {}, "First seen"), el("th", {}, "Last seen"))),
+        el(
+          "thead",
+          {},
+          el(
+            "tr",
+            {},
+            el("th", {}, "Channel"),
+            el("th", { class: "num" }, "Messages"),
+            totalEvents ? el("th", { class: "num" }, "Subs & events") : null,
+            el("th", {}, "First seen"),
+            el("th", {}, "Last seen"),
+          ),
+        ),
         el(
           "tbody",
           {},
@@ -951,6 +966,7 @@ async function viewUser(userId) {
               {},
               el("td", {}, el("a", { href: href("/search", { channel: c.channel, user_id: userId }) }, c.channel)),
               el("td", { class: "num" }, fmtInt(c.messages)),
+              totalEvents ? el("td", { class: "num" }, fmtInt(c.events)) : null,
               el("td", {}, fmtDateTime(c.first_at)),
               el("td", {}, fmtDateTime(c.last_at)),
             ),
@@ -958,9 +974,17 @@ async function viewUser(userId) {
         ),
       ),
     ),
+    events ? panel("user-events", ["Subs & events", liveBadge()], events.root) : null,
     panel("user-messages", ["Messages", liveBadge()], messages.root),
   );
-  view.onMount = () => messages.live();
+  view.onMount = () => {
+    const stopMessages = messages.live();
+    const stopEvents = events?.live();
+    return () => {
+      stopMessages();
+      stopEvents?.();
+    };
+  };
   return view;
 }
 

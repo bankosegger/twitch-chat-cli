@@ -890,6 +890,8 @@ async fn search_users(State(db): State<Arc<Db>>, Query(p): Query<UserSearchParam
 struct UserChannel {
     channel: String,
     messages: i64,
+    /// Subs, gifts, raids, ... they triggered (gift bombs count once).
+    events: i64,
     first_at: i64,
     last_at: i64,
 }
@@ -910,13 +912,21 @@ struct User {
     channels: Vec<UserChannel>,
 }
 
+/// Everything a user did: their messages (`is_message` = 1) and the events
+/// they triggered, so someone who subbed but never chatted still has a page.
+const USER_ACTIVITY: &str = "(
+    SELECT channel, login, display_name, sent_at, 1 AS is_message FROM messages WHERE user_id = ?1
+    UNION ALL
+    SELECT channel, login, display_name, sent_at, 0 FROM events WHERE user_id = ?1 AND bulk_gift = 0
+)";
+
 async fn user(State(db): State<Arc<Db>>, UrlPath(user_id): UrlPath<String>) -> ApiResult<User> {
     db.query(move |conn| {
         let names: Vec<UserName> = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT login, display_name, min(sent_at), max(sent_at)
-                 FROM messages WHERE user_id = ? GROUP BY login, display_name ORDER BY max(sent_at) DESC",
-            )?
+                 FROM {USER_ACTIVITY} GROUP BY login, display_name ORDER BY max(sent_at) DESC"
+            ))?
             .query_map([&user_id], |r| {
                 Ok(UserName {
                     login: r.get(0)?,
@@ -930,16 +940,17 @@ async fn user(State(db): State<Arc<Db>>, UrlPath(user_id): UrlPath<String>) -> A
             return Err(ApiError::NotFound);
         }
         let channels = conn
-            .prepare(
-                "SELECT channel, count(*), min(sent_at), max(sent_at)
-                 FROM messages WHERE user_id = ? GROUP BY channel ORDER BY count(*) DESC",
-            )?
+            .prepare(&format!(
+                "SELECT channel, sum(is_message), sum(1 - is_message), min(sent_at), max(sent_at)
+                 FROM {USER_ACTIVITY} GROUP BY channel ORDER BY sum(is_message) DESC, count(*) DESC"
+            ))?
             .query_map([&user_id], |r| {
                 Ok(UserChannel {
                     channel: r.get(0)?,
                     messages: r.get(1)?,
-                    first_at: r.get(2)?,
-                    last_at: r.get(3)?,
+                    events: r.get(2)?,
+                    first_at: r.get(3)?,
+                    last_at: r.get(4)?,
                 })
             })?
             .collect::<Result<_, _>>()?;

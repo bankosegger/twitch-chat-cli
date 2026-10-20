@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_channel_sent_at ON events (channel, sent_at);
 CREATE INDEX IF NOT EXISTS events_sent_at ON events (sent_at);
+CREATE INDEX IF NOT EXISTS events_user_id ON events (user_id);
 
 -- Channels the recorder should be in. `pinned` rows come from the recorder's
 -- command line and are rewritten on every start; the rest are added and
