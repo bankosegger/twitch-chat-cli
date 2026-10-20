@@ -98,7 +98,7 @@ twitch-chat serve --db chat.db --bind 0.0.0.0:8080   # reachable from other mach
 ```
 
 - **Channels**: every recorded channel, its message count and when the last message arrived. The **Recording** panel adds or removes channels for the recorder (it accepts a name, `#name` or a twitch.tv link).
-- **Channel dashboard**: messages over time, unique chatters, busiest period, sub count, a live list of subs, raids and other events, top chatters and most repeated messages, for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment.
+- **Channel dashboard**: messages over time, unique chatters, busiest period, sub count, a live list of subs, raids and other events, top chatters and most repeated messages, for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment. **Delete channel data…** removes everything recorded in the channel (and can stop recording it). The database file doesn't shrink afterwards; the space is reused for new messages, or run `sqlite3 chat.db VACUUM` while nothing else has it open.
 - **Search**: full-text search across all messages, filterable by channel and user. Every word must appear, and words match as prefixes (`kek` finds `KEKW`).
 - **Context**: click a message's timestamp to see the conversation around it
 - **Users**: a chatter's message history, the names they used, and the channels they chat in

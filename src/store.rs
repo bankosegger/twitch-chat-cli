@@ -226,6 +226,37 @@ pub fn remove_watched(conn: &Connection, channel: &str) -> rusqlite::Result<Remo
     })
 }
 
+/// Rows removed by `delete_channel`.
+pub struct Deleted {
+    pub messages: usize,
+    pub events: usize,
+}
+
+/// Rows deleted per transaction, so a recorder writing at the same time is
+/// never locked out for longer than its busy timeout.
+const DELETE_CHUNK: usize = 5000;
+
+/// Deletes every message and event recorded in `channel`.
+pub fn delete_channel(conn: &Connection, channel: &str) -> rusqlite::Result<Deleted> {
+    let delete_all = |table: &str| -> rusqlite::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {table} WHERE id IN (SELECT id FROM {table} WHERE channel = ?1 LIMIT {DELETE_CHUNK})"
+        );
+        let mut total = 0;
+        loop {
+            let n = conn.execute(&sql, [channel])?;
+            total += n;
+            if n < DELETE_CHUNK {
+                return Ok(total);
+            }
+        }
+    };
+    Ok(Deleted {
+        messages: delete_all("messages")?,
+        events: delete_all("events")?,
+    })
+}
+
 /// Normalizes user input to a Twitch login: strips a leading '#', lowercases,
 /// and checks it is 1–25 letters, digits or underscores.
 pub fn normalize_channel(input: &str) -> Option<String> {
@@ -355,6 +386,28 @@ mod tests {
         };
         assert_eq!(store.insert_events(&[event.clone(), event.clone()]).unwrap(), 1);
         assert_eq!(store.insert_events(&[event]).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_channel_removes_only_that_channel() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut other = message(Some("c"), "kekw elsewhere");
+        other.channel = "other".into();
+        store
+            .insert_batch(&[message(Some("a"), "kekw"), message(Some("b"), "hi"), other])
+            .unwrap();
+
+        let deleted = delete_channel(&store.conn, "somechannel").unwrap();
+        assert_eq!((deleted.messages, deleted.events), (2, 0));
+        let left: Vec<String> = store
+            .conn
+            .prepare("SELECT m.msg_id FROM messages_fts f JOIN messages m ON m.id = f.rowid WHERE messages_fts MATCH 'kekw'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec!["c".to_string()], "the search index drops deleted messages");
     }
 
     #[test]

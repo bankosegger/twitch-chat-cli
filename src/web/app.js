@@ -683,12 +683,20 @@ async function viewChannel(channel, params) {
   const from = range.span ? now - range.span : null;
   const filter = { channel, from };
 
-  const stats = await api("/stats", filter);
+  const [stats, watched] = await Promise.all([api("/stats", filter), api("/watched")]);
   const path = `/c/${channel}`;
+  const deleteBox = deleteChannelBox(channel, watched.find((w) => w.channel === channel));
   const header = [
     el("h1", {}, channel),
     el("p", { class: "subtitle" }, el("a", { href: `https://twitch.tv/${encodeURIComponent(channel)}`, target: "_blank", rel: "noopener" }, `twitch.tv/${channel}`)),
-    el("div", { class: "filters" }, rangeFilter(path, {}, range.key), el("a", { href: href("/search", { channel }) }, "Search this channel")),
+    el(
+      "div",
+      { class: "filters" },
+      rangeFilter(path, {}, range.key),
+      el("a", { href: href("/search", { channel }) }, "Search this channel"),
+      el("button", { type: "button", class: "small danger push-right", onclick: () => deleteBox.open() }, "Delete channel data…"),
+    ),
+    deleteBox.root,
   ];
 
   if (!stats.messages) {
@@ -750,6 +758,71 @@ async function viewChannel(channel, params) {
     };
   };
   return view;
+}
+
+/**
+ * Confirmation for deleting everything recorded in a channel. The channel
+ * name must be typed to enable the button. `watched` is the channel's entry
+ * in the recorder's list, if it has one.
+ */
+function deleteChannelBox(channel, watched) {
+  const confirmInput = el("input", { type: "text", placeholder: channel, "aria-label": "Type the channel name to confirm", autocomplete: "off", spellcheck: "false" });
+  const stopBox = el("input", { type: "checkbox", checked: watched && !watched.pinned });
+  const deleteButton = el("button", { type: "submit", class: "danger", disabled: true }, "Delete everything");
+  const error = el("p", { class: "error", hidden: true });
+  confirmInput.addEventListener("input", () => {
+    deleteButton.disabled = confirmInput.value.trim().toLowerCase() !== channel;
+  });
+
+  let recordingNote = null;
+  if (watched?.pinned) {
+    recordingNote = el("p", { class: "muted" }, `${channel} is set on the recorder's command line, so new messages will keep being recorded until it's removed there.`);
+  } else if (watched) {
+    recordingNote = el("label", { class: "check" }, stopBox, "Also stop recording this channel");
+  }
+
+  const root = el(
+    "form",
+    {
+      class: "card danger-zone",
+      hidden: true,
+      onsubmit: async (e) => {
+        e.preventDefault();
+        deleteButton.disabled = true;
+        error.hidden = true;
+        try {
+          const stop = watched && !watched.pinned && stopBox.checked;
+          const result = await apiSend("DELETE", `/channels/${encodeURIComponent(channel)}${stop ? "?stop_recording=true" : ""}`);
+          root.replaceChildren(
+            el(
+              "p",
+              {},
+              `Deleted ${fmtInt(result.messages)} message${result.messages === 1 ? "" : "s"} and ${fmtInt(result.events)} event${result.events === 1 ? "" : "s"} from ${channel}.`,
+              result.stopped_recording ? " Recording stopped." : "",
+              " ",
+              el("a", { href: "#/" }, "Back to channels"),
+            ),
+          );
+        } catch (err) {
+          error.textContent = `Delete failed: ${err.message}`;
+          error.hidden = false;
+          deleteButton.disabled = false;
+        }
+      },
+    },
+    el("p", {}, el("strong", {}, `Delete everything recorded in ${channel}?`), " All of its messages, subs and other events are removed for all time, not just the range shown. This can't be undone."),
+    recordingNote,
+    el("div", { class: "filters" }, confirmInput, deleteButton, el("button", { type: "button", class: "secondary", onclick: () => (root.hidden = true) }, "Cancel")),
+    error,
+  );
+
+  return {
+    root,
+    open() {
+      root.hidden = false;
+      confirmInput.focus();
+    },
+  };
 }
 
 /**

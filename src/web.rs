@@ -40,6 +40,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
 
     let api = Router::new()
         .route("/channels", get(channels))
+        .route("/channels/{channel}", delete(delete_channel))
         .route("/storage", get(storage))
         .route("/stats", get(stats))
         .route("/activity", get(activity))
@@ -342,6 +343,45 @@ async fn remove_watched(State(db): State<Arc<Db>>, UrlPath(channel): UrlPath<Str
         RemoveWatched::Pinned => Err(ApiError::BadRequest(format!(
             "{channel} is set on the recorder's command line; remove it there."
         ))),
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+struct DeleteChannelParams {
+    /// Also remove the channel from the recorder's list.
+    #[serde(default)]
+    stop_recording: bool,
+}
+
+#[derive(Serialize)]
+struct DeletedChannel {
+    messages: usize,
+    events: usize,
+    /// False when recording wasn't asked to stop, or the channel is pinned on
+    /// the recorder's command line.
+    stopped_recording: bool,
+}
+
+/// Deletes everything recorded in a channel. DELETE isn't a "simple" method,
+/// so browsers won't send it cross-site without a CORS preflight.
+async fn delete_channel(
+    State(db): State<Arc<Db>>,
+    UrlPath(channel): UrlPath<String>,
+    Query(p): Query<DeleteChannelParams>,
+) -> ApiResult<DeletedChannel> {
+    let channel = store::normalize_channel(&channel).ok_or(ApiError::NotFound)?;
+    db.write(move |conn| {
+        // Stop recording first, so no new messages arrive after the delete.
+        let stopped_recording =
+            p.stop_recording && matches!(store::remove_watched(conn, &channel)?, RemoveWatched::Removed);
+        let deleted = store::delete_channel(conn, &channel)?;
+        Ok(DeletedChannel {
+            messages: deleted.messages,
+            events: deleted.events,
+            stopped_recording,
+        })
     })
     .await
     .map(Json)
