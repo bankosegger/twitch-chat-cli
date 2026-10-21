@@ -778,24 +778,156 @@ function watchedPanel(initial) {
   );
 }
 
+const ACCOUNT_POLL_MS = 2000;
+
+/**
+ * Logs in to Twitch for sending messages. While a login is pending, `live()`
+ * polls until the code has been entered, and returns a function that stops it.
+ */
+function accountPanel(initial) {
+  const body = el("div");
+  let status = initial;
+  let busy = false;
+
+  async function change(request) {
+    busy = true;
+    draw();
+    try {
+      status = await request();
+    } catch (e) {
+      status = { ...status, error: e.message };
+    }
+    busy = false;
+    draw();
+  }
+
+  const logIn = () => change(() => apiSend("POST", "/chat-account/login", {}));
+  const logOut = () => change(() => apiSend("DELETE", "/chat-account"));
+
+  function draw() {
+    const show = (...nodes) => body.replaceChildren(...nodes.filter(Boolean));
+    const error = status.error ? el("p", { class: "error" }, status.error) : null;
+    if (!status.enabled) {
+      show(el("p", { class: "muted" }, "Set ", el("code", {}, "TWITCH_CLIENT_ID"), " and restart the server to send chat messages."));
+    } else if (status.pending) {
+      const p = status.pending;
+      show(
+        el(
+          "p",
+          {},
+          "Open ",
+          el("a", { href: p.verification_uri, target: "_blank", rel: "noopener" }, "twitch.tv/activate"),
+          " and enter this code, logged in as the account that should send messages:",
+        ),
+        el("div", { class: "filters" }, el("code", { class: "user-code" }, p.user_code), el("button", { type: "button", class: "secondary", disabled: busy, onclick: logOut }, "Cancel")),
+        el("p", { class: "muted hint" }, `Waiting for Twitch… the code expires in ${Math.ceil(p.expires_in / 60)} min.`),
+      );
+    } else if (status.login) {
+      show(
+        error,
+        el(
+          "div",
+          { class: "filters" },
+          el("span", {}, "Sending messages as ", el("strong", {}, status.login)),
+          el("button", { type: "button", class: "small push-right", disabled: busy, onclick: logIn }, "Switch account"),
+          el("button", { type: "button", class: "small danger", disabled: busy, onclick: logOut }, "Log out"),
+        ),
+      );
+    } else {
+      show(
+        error,
+        el("p", {}, "Log in to send chat messages from channel pages, as your own account."),
+        el("button", { type: "button", disabled: busy, onclick: logIn }, "Log in to Twitch"),
+      );
+    }
+  }
+
+  function live() {
+    let stopped = false;
+    let timer;
+    const tick = async () => {
+      if (status.pending && !busy) {
+        const next = await api("/chat-account").catch(() => null);
+        // A click may have changed the status while the request was out.
+        if (next && !busy && !stopped) {
+          status = next;
+          draw();
+        }
+      }
+      if (!stopped) timer = setTimeout(tick, ACCOUNT_POLL_MS);
+    };
+    timer = setTimeout(tick, ACCOUNT_POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }
+
+  draw();
+  return { root: panel("account", "Twitch account", body), live };
+}
+
+/** A box for sending a chat message as the logged-in account. */
+function composer(channel, account) {
+  if (!account.enabled) return null;
+  if (!account.login) {
+    return el("p", { class: "muted hint composer-hint" }, el("a", { href: "#/" }, "Log in to Twitch"), " on the Channels page to send messages here.");
+  }
+  const MAX = 500;
+  const input = el("input", { type: "text", name: "message", maxlength: MAX, placeholder: `Send a message as ${account.login}`, "aria-label": `Message to ${channel}`, autocomplete: "off" });
+  const button = el("button", { type: "submit" }, "Send");
+  const note = el("span", { class: "muted" });
+  return el(
+    "form",
+    {
+      class: "filters composer",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const message = input.value.trim();
+        if (!message) return;
+        button.disabled = true;
+        note.className = "muted";
+        note.textContent = "Sending…";
+        try {
+          await apiSend("POST", `/channels/${encodeURIComponent(channel)}/messages`, { message });
+          input.value = "";
+          note.textContent = "Sent. It shows up below once the recorder receives it.";
+        } catch (err) {
+          note.className = "error";
+          note.textContent = err.message;
+        }
+        button.disabled = false;
+        input.focus();
+      },
+    },
+    input,
+    button,
+    note,
+  );
+}
+
 async function viewOverview() {
-  const [channels, storage, watched] = await Promise.all([api("/channels"), api("/storage"), api("/watched")]);
+  const [channels, storage, watched, chatAccount] = await Promise.all([api("/channels"), api("/storage"), api("/watched"), api("/chat-account")]);
+  const account = accountPanel(chatAccount);
   if (!channels.length) {
-    return el(
+    const view = el(
       "div",
       {},
       el("h1", {}, "Channels"),
       el("p", { class: "subtitle" }, "No messages recorded yet."),
       watchedPanel(watched),
+      account.root,
       el(
         "div",
         { class: "card empty" },
         el("p", {}, "Add a channel above, and make sure the recorder is running: ", el("code", {}, "twitch-chat record --db chat.db"), "."),
       ),
     );
+    view.onMount = account.live;
+    return view;
   }
   const total = channels.reduce((sum, c) => sum + c.messages, 0);
-  return el(
+  const view = el(
     "div",
     {},
     el("h1", {}, "Channels"),
@@ -808,6 +940,7 @@ async function viewOverview() {
       el("button", { type: "button", class: "secondary", onclick: () => (location.href = "api/download") }, "Download database"),
     ),
     watchedPanel(watched),
+    account.root,
     el(
       "div",
       { class: "card" },
@@ -825,6 +958,8 @@ async function viewOverview() {
       ),
     ),
   );
+  view.onMount = account.live;
+  return view;
 }
 
 function storageTiles(storage) {
@@ -848,10 +983,11 @@ async function viewChannel(channel, params) {
   const from = range.span ? now - range.span : null;
   const filter = { channel, from };
 
-  const [stats, watched, profile] = await Promise.all([
+  const [stats, watched, profile, chatAccount] = await Promise.all([
     api("/stats", filter),
     api("/watched"),
     api(`/profile/${encodeURIComponent(channel)}`).catch(() => null),
+    api("/chat-account").catch(() => ({ enabled: false })),
     loadBadges([channel]),
   ]);
   const path = `/c/${channel}`;
@@ -932,7 +1068,7 @@ async function viewChannel(channel, params) {
       panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
       panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
     ),
-    panel("latest-messages", ["Latest messages", liveBadge()], latest.root),
+    panel("latest-messages", ["Latest messages", liveBadge()], composer(channel, chatAccount), latest.root),
   );
 
   view.onMount = () => {

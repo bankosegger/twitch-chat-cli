@@ -15,6 +15,7 @@ Connects to a channel's chat over IRC and displays it in a scrollable terminal U
 - Headless `record` mode that stores chat from many channels in SQLite
 - Web UI (`serve`) with dashboards, full-text search and user history
 - Optional stream status (online/offline, title, category, viewers) when API credentials are provided
+- Send chat messages as your own account, from the web UI or its API
 
 ## Usage
 
@@ -228,7 +229,46 @@ They enable:
 - **`record`**: viewer counts, title and category of live channels, once a minute.
 - **`serve`**: profile pictures and real badge images.
 
-Only public data is read (app access token, no login). Without credentials everything else works as before.
+Only public data is read (app access token, no login). Without credentials everything else works as before. Sending messages additionally needs a login; see [Sending messages](#sending-messages).
+
+## Sending messages
+
+`serve` can post chat messages as your Twitch account. It's off until you log in:
+
+1. Set up your [Twitch application's credentials](#twitch-api-credentials-optional). Only `TWITCH_CLIENT_ID` is needed if the app is registered as a *Public* client.
+2. Open the web UI and click **Log in to Twitch** in the **Twitch account** panel on the Channels page. It shows a code: enter it at twitch.tv/activate while logged in as the account that should send messages. The panel switches to "Sending messages as …" once you've approved it. **Switch account** and **Log out** are in the same panel.
+
+   You can also log in from the command line, before starting the server:
+
+   ```sh
+   twitch-chat login                      # saves twitch-token.json
+   twitch-chat serve --db chat.db         # picks up twitch-token.json
+   ```
+
+   Use `--token <path>` on both commands to keep the token elsewhere. The Docker setup keeps it at `/data/twitch-token.json`.
+
+3. Send messages from the box above **Latest messages** on a channel's page, or through the API:
+
+   ```sh
+   curl -X POST http://127.0.0.1:8080/api/channels/papaplatte/messages \
+        -H 'Content-Type: application/json' \
+        -d '{"message": "hello chat"}'
+   # {"msg_id":"…"}
+   ```
+
+   Add `"reply_to": "<msg_id>"` to reply to a message (`msg_id` from `/api/messages`). Your message shows up in the web UI once the recorder receives it, if it records that channel.
+
+Errors come back as `{"error": "…"}`. `400` means the message is empty, longer than 500 characters, or Twitch refused it (you're banned, followers-only mode, AutoMod, duplicate message, …). `404` means the channel doesn't exist. `502` means Twitch couldn't be reached or the login expired; log in again. `503` means you haven't logged in yet.
+
+The account API, for scripts:
+
+| Request | Does |
+| --- | --- |
+| `GET /api/chat-account` | `{"enabled", "login", "pending", "error"}`: `login` is the account messages are sent as; `pending` holds `user_code`, `verification_uri` and `expires_in` (seconds) while a login waits for the code |
+| `POST /api/chat-account/login` with body `{}` | Starts a login (replacing a pending one) and returns the same object. The account switches once the code is entered |
+| `DELETE /api/chat-account` | Cancels a pending login, or logs out: revokes the token at Twitch and deletes the token file |
+
+The token is renewed automatically and written back to the file. Anyone who can reach the server can post as you and change the logged-in account, so set `TWITCH_CHAT_PASSWORD` whenever it isn't on localhost only, and keep `twitch-token.json` private.
 
 ## Keybindings
 

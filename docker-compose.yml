@@ -21,7 +21,7 @@ services:
 
   web:
     image: twitch-chat
-    command: ["serve", "--db", "/data/chat.db", "--bind", "0.0.0.0:8080"]
+    command: ["serve", "--db", "/data/chat.db", "--bind", "0.0.0.0:8080", "--token", "/data/twitch-token.json"]
     environment:
       # Leave empty for no password. Set it in a .env file next to this one.
       TWITCH_CHAT_PASSWORD: ${TWITCH_CHAT_PASSWORD:-}

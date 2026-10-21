@@ -4,3 +4,4 @@ target
 .env
 *.db
 *.db-*
+twitch-token.json

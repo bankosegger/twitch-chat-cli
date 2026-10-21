@@ -8,24 +8,33 @@ use axum::extract::{FromRef, Path as UrlPath, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use crate::chat::{self, Account, SendError};
 use crate::helix::Helix;
 use crate::store::{self, RemoveWatched, Store};
 
 mod twitch;
 use twitch::Twitch;
 
-/// Handlers take the part they need: `State<Arc<Db>>` or `State<Arc<Twitch>>`.
+/// Handlers take the part they need: `State<Arc<Db>>`, `State<Arc<Twitch>>`
+/// or `State<Arc<Account>>`.
 #[derive(Clone)]
 struct AppState {
     db: Arc<Db>,
     twitch: Arc<Twitch>,
+    account: Arc<Account>,
+}
+
+impl FromRef<AppState> for Arc<Account> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.account)
+    }
 }
 
 impl FromRef<AppState> for Arc<Db> {
@@ -51,7 +60,7 @@ const MAX_ACTIVITY_BUCKETS: i64 = 2000;
 /// Serves the web UI and its JSON API until interrupted. When `password` is
 /// set, every request requires HTTP basic auth with that password (any
 /// username).
-pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> io::Result<()> {
+pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>, token_path: &Path) -> io::Result<()> {
     // Opening read-write once creates the schema (and the search index) if the
     // database is new or was written by an older recorder.
     Store::open(db_path).map_err(io::Error::other)?;
@@ -64,14 +73,30 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
     if helix.is_none() {
         eprintln!("set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to show profile pictures and badges");
     }
+    let account = Account::load(token_path).map_err(io::Error::other)?;
+    if !account.enabled() {
+        eprintln!("set TWITCH_CLIENT_ID to send chat messages");
+    } else {
+        match account.sender() {
+            Some(sender) => eprintln!("sending chat messages as {}", sender.login()),
+            None => eprintln!("log in to Twitch in the web UI to send chat messages"),
+        }
+        if password.is_none() && !bind.ip().is_loopback() {
+            eprintln!("warning: anyone who can reach this server can log in, and send chat messages as the logged-in account; set TWITCH_CHAT_PASSWORD");
+        }
+    }
     let state = AppState {
         db,
         twitch: Arc::new(Twitch::new(helix)),
+        account,
     };
 
     let api = Router::new()
         .route("/channels", get(channels))
         .route("/channels/{channel}", delete(delete_channel))
+        .route("/channels/{channel}/messages", post(send_message))
+        .route("/chat-account", get(chat_account).delete(logout))
+        .route("/chat-account/login", post(start_login))
         .route("/storage", get(storage))
         .route("/download", get(download))
         .route("/stats", get(stats))
@@ -220,6 +245,10 @@ impl Db {
 enum ApiError {
     BadRequest(String),
     NotFound,
+    /// A feature that isn't set up, e.g. sending without a login.
+    Unavailable(String),
+    /// Twitch failed or couldn't be reached.
+    Upstream(String),
     Internal(String),
 }
 
@@ -234,6 +263,11 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+            ApiError::Upstream(m) => {
+                eprintln!("twitch request failed: {m}");
+                (StatusCode::BAD_GATEWAY, m)
+            }
             ApiError::Internal(m) => {
                 eprintln!("request failed: {m}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
@@ -426,6 +460,71 @@ async fn delete_channel(
     })
     .await
     .map(Json)
+}
+
+/// The account messages are sent as, and any login in progress.
+async fn chat_account(State(account): State<Arc<Account>>) -> Json<chat::Status> {
+    Json(account.status())
+}
+
+/// No fields: the JSON body only makes browsers preflight cross-site requests,
+/// which this server never approves.
+#[derive(Deserialize)]
+struct StartLogin {}
+
+/// Starts a login: the response's `pending` holds the code to enter on Twitch.
+async fn start_login(State(account): State<Arc<Account>>, Json(_): Json<StartLogin>) -> ApiResult<chat::Status> {
+    if !account.enabled() {
+        return Err(ApiError::Unavailable("Set TWITCH_CLIENT_ID to log in.".to_string()));
+    }
+    account.start_login().await.map(Json).map_err(ApiError::Upstream)
+}
+
+/// Cancels a pending login and logs out. DELETE isn't a "simple" method, so
+/// browsers won't send it cross-site without a CORS preflight.
+async fn logout(State(account): State<Arc<Account>>) -> ApiResult<chat::Status> {
+    account.logout().await.map(Json).map_err(ApiError::Internal)
+}
+
+#[derive(Deserialize)]
+struct SendMessage {
+    message: String,
+    /// Twitch id (`msg_id`) of the message to reply to.
+    reply_to: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SentMessage {
+    msg_id: String,
+}
+
+/// Posts a chat message as the logged-in account. Takes a JSON body, so
+/// browsers won't send it cross-site without a CORS preflight.
+async fn send_message(
+    State(account): State<Arc<Account>>,
+    UrlPath(channel): UrlPath<String>,
+    Json(body): Json<SendMessage>,
+) -> ApiResult<SentMessage> {
+    let sender = account
+        .sender()
+        .ok_or_else(|| ApiError::Unavailable("Not logged in to Twitch.".to_string()))?;
+    let channel = store::normalize_channel(&channel).ok_or(ApiError::NotFound)?;
+    let message = body.message.trim();
+    if message.is_empty() {
+        return Err(ApiError::BadRequest("The message is empty.".to_string()));
+    }
+    if message.chars().count() > chat::MAX_MESSAGE_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "Messages are at most {} characters.",
+            chat::MAX_MESSAGE_LEN
+        )));
+    }
+    match sender.send(&channel, message, body.reply_to.as_deref()).await {
+        Ok(msg_id) => Ok(Json(SentMessage { msg_id })),
+        Err(SendError::NoSuchChannel) => Err(ApiError::NotFound),
+        Err(SendError::Rejected(m)) => Err(ApiError::BadRequest(m)),
+        Err(SendError::Failed(m)) => Err(ApiError::Upstream(m)),
+    }
 }
 
 #[derive(Serialize)]

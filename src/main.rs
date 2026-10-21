@@ -1,4 +1,5 @@
 mod app;
+mod chat;
 mod helix;
 mod irc;
 mod record;
@@ -68,6 +69,18 @@ enum Command {
         /// Address to listen on
         #[arg(long, default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
+
+        /// Token saved by `login`; enables sending chat messages when present
+        #[arg(long, default_value = "twitch-token.json")]
+        token: PathBuf,
+    },
+    /// Log in to Twitch so `serve` can send chat messages as that account
+    ///
+    /// Prints a code to enter at twitch.tv/activate. Needs TWITCH_CLIENT_ID.
+    Login {
+        /// Where to save the token
+        #[arg(long, default_value = "twitch-token.json")]
+        token: PathBuf,
     },
 }
 
@@ -78,10 +91,11 @@ async fn main() -> io::Result<()> {
     let args = Args::parse();
     match args.command {
         Some(Command::Record { channels, db }) => return record::run(channels, &db).await,
-        Some(Command::Serve { db, bind }) => {
+        Some(Command::Serve { db, bind, token }) => {
             let password = env::var("TWITCH_CHAT_PASSWORD").ok().filter(|p| !p.is_empty());
-            return web::run(&db, bind, password).await;
+            return web::run(&db, bind, password, &token).await;
         }
+        Some(Command::Login { token }) => return chat::login(&token).await.map_err(io::Error::other),
         None => {}
     }
     let channel = args
