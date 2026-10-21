@@ -801,6 +801,12 @@ async function viewOverview() {
     el("h1", {}, "Channels"),
     el("p", { class: "subtitle" }, `${fmtInt(total)} messages across ${channels.length} channel${channels.length === 1 ? "" : "s"}`),
     storageTiles(storage),
+    el(
+      "p",
+      {},
+      // The server answers with Content-Disposition: attachment, so the page stays put.
+      el("button", { type: "button", class: "secondary", onclick: () => (location.href = "api/download") }, "Download database"),
+    ),
     watchedPanel(watched),
     el(
       "div",

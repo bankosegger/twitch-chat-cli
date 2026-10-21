@@ -73,6 +73,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>) -> 
         .route("/channels", get(channels))
         .route("/channels/{channel}", delete(delete_channel))
         .route("/storage", get(storage))
+        .route("/download", get(download))
         .route("/stats", get(stats))
         .route("/activity", get(activity))
         .route("/top-chatters", get(top_chatters))
@@ -462,6 +463,59 @@ async fn storage(State(db): State<Arc<Db>>) -> ApiResult<Storage> {
     })
     .await
     .map(Json)
+}
+
+/// Streams a consistent copy of the whole database. The recorder keeps
+/// writing (partly into the `-wal` file), so the file on disk can't be sent
+/// as is: `VACUUM INTO` writes a snapshot next to it, deleted once sent.
+async fn download(State(db): State<Arc<Db>>) -> Result<Response, ApiError> {
+    let dir = match db.path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let snapshot = db
+        .query(move |conn| {
+            // VACUUM INTO accepts an existing file as long as it is empty.
+            let snapshot = tempfile::Builder::new()
+                .prefix(".download-")
+                .suffix(".db")
+                .tempfile_in(&dir)
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+                .into_temp_path();
+            let target = snapshot.to_str().ok_or_else(|| ApiError::Internal("non-UTF-8 temp path".into()))?;
+            conn.execute("VACUUM INTO ?", [target])?;
+            Ok(snapshot)
+        })
+        .await?;
+
+    let file = tokio::fs::File::open(&snapshot)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let len = file.metadata().await.map_err(|e| ApiError::Internal(e.to_string()))?.len();
+    // The state tuple drops the file before the temp path, so the snapshot is
+    // closed before it is deleted (required on Windows), whether the download
+    // finishes or the client disconnects.
+    let body = futures_util::stream::try_unfold((file, snapshot), |(mut file, snapshot)| async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0; 64 * 1024];
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            return Ok::<_, io::Error>(None);
+        }
+        buf.truncate(n);
+        Ok(Some((axum::body::Bytes::from(buf), (file, snapshot))))
+    });
+
+    let name = db.path.file_name().and_then(|n| n.to_str()).unwrap_or("chat.db").replace('"', "");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.sqlite3".to_string()),
+            (header::CONTENT_LENGTH, len.to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+        ],
+        axum::body::Body::from_stream(body),
+    )
+        .into_response())
 }
 
 #[derive(Serialize)]
