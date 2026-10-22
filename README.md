@@ -14,6 +14,7 @@ Connects to a channel's chat over IRC and displays it in a scrollable terminal U
 - Cheers (bits), bans, timeouts and deleted messages: moderated messages are struck through
 - Headless `record` mode that stores chat from many channels in SQLite
 - Web UI (`serve`) with dashboards, full-text search and user history
+- [7TV](https://7tv.app) emotes in the web UI, including zero-width (overlay) emotes
 - Optional stream status (online/offline, title, category, viewers) when API credentials are provided
 - Send chat messages as your own account, from the web UI or its API
 
@@ -134,12 +135,16 @@ twitch-chat serve --db chat.db --bind 0.0.0.0:8080   # reachable from other mach
 ```
 
 - **Channels**: every recorded channel, its message count and when the last message arrived. The **Recording** panel adds or removes channels for the recorder (it accepts a name, `#name` or a twitch.tv link).
-- **Channel dashboard**: messages over time, unique chatters, busiest period, subs, bits, moderation counts, live lists of subs/cheers/raids and of timeouts/bans/deletions, top chatters and most repeated messages; with API credentials also viewer counts over time, whether the channel is live now, and its profile picture. All of it for the last hour, 24 hours, 7 days, 30 days or all time. Messages show Twitch emotes, cheered bits, and (with API credentials) real badge images; moderated messages are struck through. for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment. **Delete channel data…** removes everything recorded in the channel (and can stop recording it). The database file doesn't shrink afterwards; the space is reused for new messages, or run `sqlite3 chat.db VACUUM` while nothing else has it open.
+- **Channel dashboard**: messages over time, unique chatters, busiest period, subs, bits, moderation counts, live lists of subs/cheers/raids and of timeouts/bans/deletions, top chatters and most repeated messages; with API credentials also viewer counts over time, whether the channel is live now, and its profile picture. All of it for the last hour, 24 hours, 7 days, 30 days or all time. Messages show Twitch and [7TV](#7tv-emotes) emotes, cheered bits, and (with API credentials) real badge images; moderated messages are struck through. for the last hour, 24 hours, 7 days, 30 days or all time. Click a point on the chart to read the chat from that moment. **Delete channel data…** removes everything recorded in the channel (and can stop recording it). The database file doesn't shrink afterwards; the space is reused for new messages, or run `sqlite3 chat.db VACUUM` while nothing else has it open.
 - **Search**: full-text search across all messages, filterable by channel and user. Every word must appear, and words match as prefixes (`kek` finds `KEKW`).
 - **Context**: click a message's timestamp to see the conversation around it
 - **Users**: a chatter's message history, the names they used, the channels they chat in, their subs and cheers, and any timeouts, bans or deleted messages
 
 It listens on localhost only by default. To expose it, set `TWITCH_CHAT_PASSWORD` (any username is accepted) and put it behind a TLS reverse proxy, or keep it on localhost and use an SSH tunnel: `ssh -L 8080:localhost:8080 your-server`.
+
+### 7TV emotes
+
+Messages in the web UI show the channel's [7TV](https://7tv.app) emotes and 7TV's global emotes, and zero-width emotes are drawn over the emote before them. This needs no setup or credentials. The server fetches emote sets from 7TV's public API (`7tv.io`) and keeps each one for 10 minutes. Your browser then loads the images from `cdn.7tv.app`. Channels without a 7TV account only get the global emotes. The emote list is available at `GET /api/7tv-emotes?channel=<name>`.
 
 ### Running with Docker
 

@@ -374,6 +374,10 @@ details.data-table .scroll { max-height: 280px; overflow: auto; margin-top: 6px;
 /* Bits, emotes and badge images; all sized to the 18px chat line. */
 .bits { color: #fbbf24; font-weight: 700; margin-right: 4px; }
 .emote { height: 24px; margin: -3px 0; vertical-align: middle; }
+/* A 7TV zero-width emote, centered over the emote before it. */
+.emote-stack { position: relative; display: inline-block; vertical-align: middle; margin: -3px 0; }
+.emote-stack > .emote { display: block; margin: 0; }
+.emote-stack > .zero-width { position: absolute; top: 0; left: 50%; transform: translateX(-50%); }
 .badge-img { width: 18px; height: 18px; margin-right: 3px; vertical-align: top; }
 
 /* Profile heading and live status */

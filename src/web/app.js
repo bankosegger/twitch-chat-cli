@@ -181,25 +181,35 @@ function nameColor(color, login) {
 
 // ---------- Twitch images ----------
 
-/** Badge images per channel (`"subscriber/12"` → `{ url, title }`), filled by `loadBadges`. */
+/** Badge images per channel (`"subscriber/12"` → `{ url, title }`), filled by `loadChannelImages`. */
 const badgeImages = new Map();
 const badgeRequests = new Map();
 
-/** Fetches badge images for these channels, once each. Empty without API credentials. */
-function loadBadges(channels) {
-  return Promise.all(
-    [...new Set(channels)].map((channel) => {
-      if (!badgeRequests.has(channel)) {
-        badgeRequests.set(
-          channel,
-          api("/badges", { channel })
-            .then((map) => badgeImages.set(channel, map))
-            .catch(() => badgeImages.set(channel, {})),
-        );
-      }
-      return badgeRequests.get(channel);
-    }),
-  );
+/** 7TV emotes per channel (`"KEKW"` → `{ url, zero_width }`), filled by `loadChannelImages`. */
+const sevenTvEmotes = new Map();
+const sevenTvRequests = new Map();
+
+/** Fetches `path` for each channel once, keeping the answer (`{}` on failure) in `into`. */
+function loadPerChannel(channels, path, into, requests) {
+  return [...new Set(channels)].map((channel) => {
+    if (!requests.has(channel)) {
+      requests.set(
+        channel,
+        api(path, { channel })
+          .then((map) => into.set(channel, map))
+          .catch(() => into.set(channel, {})),
+      );
+    }
+    return requests.get(channel);
+  });
+}
+
+/** Fetches badge images (empty without API credentials) and 7TV emotes for these channels. */
+function loadChannelImages(channels) {
+  return Promise.all([
+    ...loadPerChannel(channels, "/badges", badgeImages, badgeRequests),
+    ...loadPerChannel(channels, "/7tv-emotes", sevenTvEmotes, sevenTvRequests),
+  ]);
 }
 
 /** Real badge images when known, else the text badges. */
@@ -216,11 +226,55 @@ function badgeNodes(raw, channel) {
 
 const emoteUrl = (id, scale) => `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(id)}/default/dark/${scale}`;
 
+const emoteImg = (name, src, srcset) => el("img", { class: "emote", src, srcset, alt: name, title: name, loading: "lazy" });
+
 /**
- * Message text with Twitch emotes as images. `emotes` is the raw tag
- * (`25:0-4,6-10/1902:12-16`); positions count characters, not UTF-16 units.
+ * Message text with Twitch emotes, then the channel's 7TV emotes, as images.
+ * `emotes` is the raw tag (`25:0-4,6-10/1902:12-16`); positions count
+ * characters, not UTF-16 units.
  */
-function messageText(text, emotes) {
+function messageText(text, emotes, channel) {
+  const out = [];
+  for (const part of twitchEmotes(text, emotes)) {
+    if (typeof part === "string") appendSevenTv(out, part, sevenTvEmotes.get(channel));
+    else out.push(part);
+  }
+  return out;
+}
+
+/**
+ * Appends `text` to `out` with words that are 7TV emotes as images. A
+ * zero-width emote (a hat, rain, ...) is laid over the emote before it, when
+ * there is one.
+ */
+function appendSevenTv(out, text, emotes) {
+  if (!emotes) {
+    out.push(text);
+    return;
+  }
+  for (const word of text.split(/(\s+)/)) {
+    const emote = Object.hasOwn(emotes, word) ? emotes[word] : null;
+    if (!emote) {
+      if (word) out.push(word);
+      continue;
+    }
+    const img = emoteImg(word, `${emote.url}/1x.webp`, `${emote.url}/2x.webp 2x`);
+    // The emote it covers is the last node, or the one before a single space.
+    const prevIndex = out.length - (out[out.length - 1] === " " ? 2 : 1);
+    const prev = out[prevIndex];
+    if (emote.zero_width && prev instanceof Element) {
+      const stack = prev.classList.contains("emote-stack") ? prev : el("span", { class: "emote-stack" }, prev);
+      img.classList.add("zero-width");
+      stack.append(img);
+      out.splice(prevIndex, out.length - prevIndex, stack);
+    } else {
+      out.push(img);
+    }
+  }
+}
+
+/** Text and Twitch emote images, from the `emotes` tag. */
+function twitchEmotes(text, emotes) {
   if (!emotes) return [text];
   const ranges = [];
   for (const part of emotes.split("/")) {
@@ -238,7 +292,7 @@ function messageText(text, emotes) {
     if (start < at || end >= chars.length) continue;
     if (start > at) out.push(chars.slice(at, start).join(""));
     const name = chars.slice(start, end + 1).join("");
-    out.push(el("img", { class: "emote", src: emoteUrl(id, "1.0"), srcset: `${emoteUrl(id, "2.0")} 2x`, alt: name, title: name, loading: "lazy" }));
+    out.push(emoteImg(name, emoteUrl(id, "1.0"), `${emoteUrl(id, "2.0")} 2x`));
     at = end + 1;
   }
   if (at < chars.length) out.push(chars.slice(at).join(""));
@@ -269,7 +323,7 @@ function messageRow(m, { showChannel = false, focus = false } = {}) {
     badgeNodes(m.badges, m.channel),
     name,
     ": ",
-    el("span", { class: "text" }, messageText(m.text, m.emotes)),
+    el("span", { class: "text" }, messageText(m.text, m.emotes, m.channel)),
     deleted ? el("span", { class: "deleted-tag" }, "deleted") : null,
   );
 }
@@ -401,7 +455,7 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
 }
 
 /** Paged endpoints for `pagedMessages`; `prepare` runs before rows are built. */
-const MESSAGES = { path: "/messages", key: "messages", noun: "messages", row: messageRow, prepare: (items) => loadBadges(items.map((m) => m.channel)) };
+const MESSAGES = { path: "/messages", key: "messages", noun: "messages", row: messageRow, prepare: (items) => loadChannelImages(items.map((m) => m.channel)) };
 const EVENTS = { path: "/events", key: "events", noun: "events", row: eventRow };
 const MODERATION = { path: "/moderation", key: "moderation", noun: "moderation actions", row: moderationRow };
 
@@ -988,7 +1042,7 @@ async function viewChannel(channel, params) {
     api("/watched"),
     api(`/profile/${encodeURIComponent(channel)}`).catch(() => null),
     api("/chat-account").catch(() => ({ enabled: false })),
-    loadBadges([channel]),
+    loadChannelImages([channel]),
   ]);
   const path = `/c/${channel}`;
   const deleteBox = deleteChannelBox(channel, watched.find((w) => w.channel === channel));
@@ -1317,7 +1371,7 @@ async function viewSearch(params) {
 async function viewContext(id) {
   const ctx = await api(`/messages/${id}/context`, { n: 40 });
   const focus = ctx.messages.find((m) => m.id === ctx.focus);
-  await loadBadges([focus.channel]);
+  await loadChannelImages([focus.channel]);
   const list = el("ul", { class: "messages" }, ctx.messages.map((m) => messageRow(m, { focus: m.id === ctx.focus })));
   const view = el(
     "div",

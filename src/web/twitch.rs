@@ -151,21 +151,8 @@ pub async fn badges(
     if !twitch.enabled() {
         return Ok(Json(BadgeMap::new()));
     }
-    // Chat messages carry the channel's id, so no extra API call is needed.
     let room_id = match p.channel.and_then(|c| crate::store::normalize_channel(&c)) {
-        Some(channel) => {
-            db.query(move |conn| {
-                use rusqlite::OptionalExtension;
-                Ok(conn
-                    .query_row(
-                        "SELECT room_id FROM messages WHERE channel = ? AND room_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1",
-                        [channel],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .optional()?)
-            })
-            .await?
-        }
+        Some(channel) => db.room_id(channel).await?,
         None => None,
     };
     Ok(Json(twitch.badges(room_id.as_deref()).await))

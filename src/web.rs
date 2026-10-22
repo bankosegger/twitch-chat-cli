@@ -19,15 +19,18 @@ use crate::chat::{self, Account, SendError};
 use crate::helix::Helix;
 use crate::store::{self, RemoveWatched, Store};
 
+mod seventv;
 mod twitch;
+use seventv::SevenTv;
 use twitch::Twitch;
 
-/// Handlers take the part they need: `State<Arc<Db>>`, `State<Arc<Twitch>>`
-/// or `State<Arc<Account>>`.
+/// Handlers take the part they need: `State<Arc<Db>>`, `State<Arc<Twitch>>`,
+/// `State<Arc<SevenTv>>` or `State<Arc<Account>>`.
 #[derive(Clone)]
 struct AppState {
     db: Arc<Db>,
     twitch: Arc<Twitch>,
+    seventv: Arc<SevenTv>,
     account: Arc<Account>,
 }
 
@@ -46,6 +49,12 @@ impl FromRef<AppState> for Arc<Db> {
 impl FromRef<AppState> for Arc<Twitch> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.twitch)
+    }
+}
+
+impl FromRef<AppState> for Arc<SevenTv> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.seventv)
     }
 }
 
@@ -88,6 +97,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>, tok
     let state = AppState {
         db,
         twitch: Arc::new(Twitch::new(helix)),
+        seventv: Arc::new(SevenTv::new()),
         account,
     };
 
@@ -114,6 +124,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>, tok
         .route("/watched/{channel}", delete(remove_watched))
         .route("/profile/{login}", get(twitch::profile))
         .route("/badges", get(twitch::badges))
+        .route("/7tv-emotes", get(seventv::emotes))
         .with_state(state);
 
     let mut app = Router::new()
@@ -239,6 +250,21 @@ impl Db {
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
+    }
+
+    /// The channel's Twitch user id, from its latest message: chat messages
+    /// carry it, so no API call is needed.
+    async fn room_id(self: &Arc<Self>, channel: String) -> Result<Option<String>, ApiError> {
+        self.query(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT room_id FROM messages WHERE channel = ? AND room_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1",
+                    [channel],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+        .await
     }
 }
 
