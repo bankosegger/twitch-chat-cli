@@ -671,6 +671,28 @@ function panel(key, title, ...children) {
   return node;
 }
 
+/** Makes `button` toggle `node` between its normal place and filling the browser window. */
+function fullscreenToggle(node, button) {
+  // The summary is hidden in fullscreen, so the way out needs its own button.
+  node.append(el("button", { type: "button", class: "small fullscreen-exit", onclick: () => setOn(false) }, "Exit fullscreen"));
+  const onKey = (e) => {
+    if (e.key === "Escape") setOn(false);
+  };
+  function setOn(on) {
+    node.classList.toggle("fullscreen", on);
+    document.body.classList.toggle("no-scroll", on);
+    if (on) document.addEventListener("keydown", onKey);
+    else document.removeEventListener("keydown", onKey);
+  }
+  button.addEventListener("click", (e) => {
+    // The button sits in the panel's <summary>; don't let the click collapse it.
+    e.preventDefault();
+    node.open = true;
+    setOn(true);
+  });
+  return () => setOn(false);
+}
+
 const SORT_KEY = "table-sort";
 const tableSorts = JSON.parse(localStorage.getItem(SORT_KEY) || "{}");
 
@@ -1093,6 +1115,10 @@ async function viewChannel(channel, params) {
   const moderation = modActions ? pagedMessages({ channel, from, limit: 30 }, { source: MODERATION }) : null;
   const subsTotal = stats.subs + stats.gift_subs;
 
+  const fullscreenButton = el("button", { type: "button", class: "small push-right" }, "Fullscreen");
+  const chatPanel = panel("latest-messages", ["Latest messages", liveBadge(), fullscreenButton], composer(channel, chatAccount), latest.root);
+  const exitFullscreen = fullscreenToggle(chatPanel, fullscreenButton);
+
   const view = el(
     "div",
     {},
@@ -1122,7 +1148,7 @@ async function viewChannel(channel, params) {
       panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
       panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
     ),
-    panel("latest-messages", ["Latest messages", liveBadge()], composer(channel, chatAccount), latest.root),
+    chatPanel,
   );
 
   view.onMount = () => {
@@ -1136,7 +1162,7 @@ async function viewChannel(channel, params) {
           onSelect: (p) => (location.hash = href("/search", { channel, from: p.t, to: p.t + bucket.ms })),
         })
       : null;
-    const stops = [stopChart, stopViewers, latest.live(), events.live(), moderation?.live()];
+    const stops = [stopChart, stopViewers, latest.live(), events.live(), moderation?.live(), exitFullscreen];
     return () => stops.forEach((stop) => stop?.());
   };
   return view;
