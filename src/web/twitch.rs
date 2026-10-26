@@ -10,7 +10,7 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiResult, Db};
+use super::db::{ApiResult, Db};
 use crate::helix::{BadgeSet, Helix, User};
 
 /// Profiles and badges change rarely.

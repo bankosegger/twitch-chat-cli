@@ -10,7 +10,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiResult, Db};
+use super::db::{ApiResult, Db};
 
 const API_URL: &str = "https://7tv.io/v3";
 /// Streamers add and remove 7TV emotes now and then, so don't keep them long.
