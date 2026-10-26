@@ -96,18 +96,15 @@ h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
 /* Two-column pages; the side column drops below on narrow screens. */
 .columns { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 12px; align-items: start; }
 .col-main, .col-side { min-width: 0; }
-/* Chat stays in view beside the page and scrolls on its own. */
-.col-side > .panel.chat[open]:not(.fullscreen) {
-  position: sticky;
-  top: 56px;
-  display: flex;
-  flex-direction: column;
-  max-height: calc(100vh - 68px);
-}
-.col-side > .panel.chat[open]:not(.fullscreen) > .panel-body { overflow-y: auto; min-height: 0; }
+/* Chat stays in view beside the page and scrolls on its own. <details> doesn't
+   lay out its children as flex items, so the body gets its own height cap:
+   viewport minus topbar, page padding and the panel's summary and padding. */
+.col-side > .panel.chat:not(.fullscreen) { position: sticky; top: 56px; }
+.col-side > .panel.chat:not(.fullscreen) > .panel-body { max-height: calc(100vh - 136px); overflow-y: auto; }
 @media (max-width: 900px) {
   .columns { grid-template-columns: minmax(0, 1fr); }
-  .col-side > .panel.chat[open]:not(.fullscreen) { position: static; max-height: 70vh; }
+  .col-side > .panel.chat:not(.fullscreen) { position: static; }
+  .col-side > .panel.chat:not(.fullscreen) > .panel-body { max-height: 70vh; }
 }
 
 /* Collapsible panels. The summary's negative margin makes the whole card
