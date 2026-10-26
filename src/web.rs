@@ -1185,6 +1185,7 @@ fn mod_from_row(r: &Row<'_>) -> rusqlite::Result<ModRow> {
 struct ModParams {
     /// Actions against this user.
     user_id: Option<String>,
+    login: Option<String>,
     before: Option<String>,
     after: Option<i64>,
     limit: Option<usize>,
@@ -1206,6 +1207,9 @@ async fn moderation(
     let mut filter = Filter::range(&range);
     if let Some(user_id) = non_empty(&p.user_id) {
         filter.add("target_user_id = ?", [Value::Text(user_id.to_string())]);
+    }
+    if let Some(login) = non_empty(&p.login) {
+        filter.add("target_login = ?", [Value::Text(login.to_lowercase())]);
     }
     let page = PageParams::new(&mut filter, &p.before, p.after, limit)?;
     db.query(move |conn| {

@@ -1374,9 +1374,17 @@ async function viewSearch(params) {
     { q: current.q, channel: current.channel, login: current.login, user_id: current.user_id, from: current.from, to: current.to },
     { showChannel: !current.channel, emptyText: "No messages match." },
   );
-  await results.ready;
+  const userFilter = current.login || current.user_id;
+  const moderation = userFilter
+    ? pagedMessages(
+        { login: current.login, user_id: current.user_id, channel: current.channel, from: current.from, to: current.to, limit: 30 },
+        { showChannel: !current.channel, source: MODERATION },
+      )
+    : null;
+  await Promise.all([results.ready, moderation?.ready]);
   // A window that ends in the past can't gain messages.
   const isLive = !current.to;
+  const moderated = moderation?.root.querySelector("li") != null;
 
   const view = el(
     "div",
@@ -1385,11 +1393,14 @@ async function viewSearch(params) {
     el("p", { class: "subtitle" }, "Every word must appear; words match as prefixes (kek finds KEKW). Newest first."),
     form,
     chips.length ? el("div", { class: "filters" }, chips) : null,
+    moderated ? panel("search-moderation", "Timeouts, bans & deletions", moderation.root) : null,
     el("div", { class: "card" }, results.root),
   );
   view.onMount = () => {
     if (!current.q && !current.login) qInput.focus();
-    return isLive ? results.live() : null;
+    if (!isLive) return null;
+    const stops = [results.live(), moderated ? moderation.live() : null];
+    return () => stops.forEach((stop) => stop?.());
   };
   return view;
 }

@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS moderation (
 );
 CREATE INDEX IF NOT EXISTS moderation_channel_sent_at ON moderation (channel, sent_at);
 CREATE INDEX IF NOT EXISTS moderation_target_user_id ON moderation (target_user_id);
+CREATE INDEX IF NOT EXISTS moderation_target_login ON moderation (target_login);
 
 -- Viewer counts, sampled about once a minute while a channel is live.
 CREATE TABLE IF NOT EXISTS stream_samples (
