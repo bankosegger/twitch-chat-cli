@@ -1089,6 +1089,7 @@ async function viewChannel(channel, params) {
       el("button", { type: "button", class: "small danger push-right", onclick: () => deleteBox.open() }, "Delete channel data…"),
     ),
     deleteBox.root,
+    streamPanel(channel, Boolean(stats.live)),
   ];
 
   if (!stats.messages) {
@@ -1194,6 +1195,25 @@ function profileHeading(profile, fallbackName) {
 }
 
 /** "● Live · 1,234 viewers · Just Chatting · up 2h 5m · title". */
+/**
+ * The Twitch player for `channel`. The iframe only exists while the panel is
+ * open, so a collapsed panel doesn't keep the stream playing in the background.
+ */
+function streamPanel(channel, live) {
+  const box = el("div", { class: "stream" });
+  const node = panel("stream", "Stream", box);
+  function sync() {
+    if (!node.open) return box.replaceChildren();
+    if (box.firstChild) return;
+    // Twitch refuses to play unless `parent` names the page's own host.
+    const src = `https://player.twitch.tv/?${new URLSearchParams({ channel, parent: location.hostname, muted: "true", autoplay: String(live) })}`;
+    box.append(el("iframe", { src, title: `${channel} on Twitch`, allowfullscreen: "", allow: "autoplay; fullscreen" }));
+  }
+  node.addEventListener("toggle", sync);
+  sync();
+  return node;
+}
+
 function liveLine(live) {
   const up = fmtDuration(Math.floor((Date.now() - live.started_at) / 1000));
   return el(

@@ -265,6 +265,7 @@ td a { color: var(--text-primary); }
 .rank-value { font-weight: 600; }
 
 /* Chart */
+.stream iframe { display: block; width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: 4px; }
 .chart { position: relative; }
 .chart svg { display: block; width: 100%; overflow: visible; }
 .chart svg:focus { outline: none; }
