@@ -261,7 +261,7 @@ td a { color: var(--text-primary); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.rank-sub { color: var(--text-muted); }
+.rank-sub { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rank-value { font-weight: 600; }
 
 /* Chart */

@@ -89,6 +89,15 @@ function fmtMessageTime(ms) {
   return sameDay ? timeSecFmt.format(d) : `${dayFmt.format(d)} ${timeSecFmt.format(d)}`;
 }
 
+/** `fmtAgo` for narrow columns: "5m ago", "3h ago". */
+function fmtAgoShort(ms) {
+  const s = Math.round((Date.now() - ms) / 1000);
+  for (const [unit, size] of [["d", 86400], ["h", 3600], ["m", 60]]) {
+    if (s >= size) return `${Math.floor(s / size)}${unit} ago`;
+  }
+  return "now";
+}
+
 function fmtAgo(ms) {
   const s = Math.round((Date.now() - ms) / 1000);
   if (s < 60) return "just now";
@@ -1310,7 +1319,7 @@ function rolesTable(roles, role) {
     holders.map((r) => ({
       label: r.display_name,
       href: r.user_id ? href(`/u/${encodeURIComponent(r.user_id)}`) : href("/search", { login: r.login }),
-      sub: fmtAgo(r.last_at),
+      sub: fmtAgoShort(r.last_at),
       value: r.messages,
     })),
   );
