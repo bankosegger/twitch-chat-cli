@@ -312,15 +312,6 @@ details.data-table .scroll { max-height: 280px; overflow: auto; margin-top: 6px;
 .msg .channel { color: var(--text-muted); margin-right: 6px; }
 .msg.new { animation: msg-new 1.5s ease-out; }
 @keyframes msg-new { from { background: var(--tint); } }
-.live {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 6px;
-  vertical-align: middle;
-  border-radius: 50%;
-  background: #3ecf8e;
-}
 @media (prefers-reduced-motion: reduce) {
   .msg.new { animation: none; }
 }

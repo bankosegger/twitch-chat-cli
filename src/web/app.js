@@ -459,10 +459,6 @@ const MESSAGES = { path: "/messages", key: "messages", noun: "messages", row: me
 const EVENTS = { path: "/events", key: "events", noun: "events", row: eventRow };
 const MODERATION = { path: "/moderation", key: "moderation", noun: "moderation actions", row: moderationRow };
 
-function liveBadge() {
-  return el("span", { class: "live", role: "img", "aria-label": "Live", title: "Live: new messages appear automatically" });
-}
-
 function statTile(label, value, sub) {
   return el(
     "div",
@@ -1094,9 +1090,10 @@ async function viewChannel(channel, params) {
   const end = range.span ? now : stats.last_at;
   const bucket = pickBucket(end - start);
   const hasViewers = stats.peak_viewers != null;
-  const [activity, chatters, repeated, viewerActivity] = await Promise.all([
+  const [activity, chatters, roles, repeated, viewerActivity] = await Promise.all([
     api("/activity", { ...filter, bucket: bucket.ms, tz_offset: tzOffset() }),
     api("/top-chatters", { ...filter, limit: 15 }),
+    api("/roles", filter),
     api("/top-messages", { ...filter, limit: 15 }),
     hasViewers ? api("/viewers", { ...filter, bucket: bucket.ms, tz_offset: tzOffset() }) : null,
   ]);
@@ -1116,13 +1113,14 @@ async function viewChannel(channel, params) {
   const subsTotal = stats.subs + stats.gift_subs;
 
   const fullscreenButton = el("button", { type: "button", class: "small push-right" }, "Fullscreen");
-  const chatPanel = panel("latest-messages", ["Latest messages", liveBadge(), fullscreenButton], composer(channel, chatAccount), latest.root);
+  const chatPanel = panel("latest-messages", ["Latest messages", fullscreenButton], composer(channel, chatAccount), latest.root);
   const exitFullscreen = fullscreenToggle(chatPanel, fullscreenButton);
 
   const view = el(
     "div",
     {},
     header,
+    chatPanel,
     el(
       "div",
       { class: "tiles" },
@@ -1140,15 +1138,22 @@ async function viewChannel(channel, params) {
     ),
     panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
     hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
-    panel("events", ["Subs & events", liveBadge()], events.root),
-    moderation ? panel("moderation", ["Timeouts, bans & deletions", liveBadge()], moderation.root) : null,
+    panel("events", "Subs & events", events.root),
+    moderation ? panel("moderation", "Timeouts, bans & deletions", moderation.root) : null,
     el(
       "div",
       { class: "grid-2" },
       panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
       panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
     ),
-    chatPanel,
+    roles.length
+      ? el(
+          "div",
+          { class: "grid-2" },
+          panel("moderators", "Moderators", rolesTable(roles, "moderator")),
+          panel("vips", "VIPs", rolesTable(roles, "vip")),
+        )
+      : null,
   );
 
   view.onMount = () => {
@@ -1297,6 +1302,20 @@ function chattersTable(chatters, total) {
   );
 }
 
+function rolesTable(roles, role) {
+  const holders = roles.filter((r) => r.role === role);
+  if (!holders.length) return el("p", { class: "muted" }, "None seen in chat in this time range.");
+  return rankList(
+    [role === "vip" ? "VIP" : "Moderator", "Last seen", "Messages"],
+    holders.map((r) => ({
+      label: r.display_name,
+      href: r.user_id ? href(`/u/${encodeURIComponent(r.user_id)}`) : href("/search", { login: r.login }),
+      sub: fmtAgo(r.last_at),
+      value: r.messages,
+    })),
+  );
+}
+
 function repeatedTable(rows, channel, from) {
   if (!rows.length) return el("p", { class: "muted" }, "No message was sent more than once.");
   return rankList(
@@ -1389,7 +1408,7 @@ async function viewSearch(params) {
   const view = el(
     "div",
     {},
-    el("h1", {}, "Search", isLive ? liveBadge() : null),
+    el("h1", {}, "Search"),
     el("p", { class: "subtitle" }, "Every word must appear; words match as prefixes (kek finds KEKW). Newest first."),
     form,
     chips.length ? el("div", { class: "filters" }, chips) : null,
@@ -1500,9 +1519,9 @@ async function viewUser(userId) {
         ),
       ),
     ),
-    events ? panel("user-events", ["Subs & events", liveBadge()], events.root) : null,
+    events ? panel("user-events", "Subs & events", events.root) : null,
     moderated ? panel("user-moderation", "Timeouts, bans & deletions", moderation.root) : null,
-    panel("user-messages", ["Messages", liveBadge()], messages.root),
+    panel("user-messages", "Messages", messages.root),
   );
   view.onMount = () => {
     const stops = [messages.live(), events?.live()];

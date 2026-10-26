@@ -113,6 +113,7 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>, tok
         .route("/activity", get(activity))
         .route("/top-chatters", get(top_chatters))
         .route("/top-messages", get(top_messages))
+        .route("/roles", get(roles))
         .route("/messages", get(messages))
         .route("/messages/{id}/context", get(message_context))
         .route("/events", get(events))
@@ -866,6 +867,51 @@ async fn top_chatters(
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Serialize)]
+struct RoleHolder {
+    user_id: Option<String>,
+    login: String,
+    display_name: String,
+    /// `moderator` or `vip`.
+    role: &'static str,
+    messages: i64,
+    last_at: i64,
+}
+
+/// Moderators and VIPs, as seen in the badges of each chatter's latest
+/// message in the range: Twitch offers no list of them without the
+/// broadcaster's own token.
+async fn roles(State(db): State<Arc<Db>>, Query(range): Query<RangeParams>) -> ApiResult<Vec<RoleHolder>> {
+    let filter = Filter::range(&range);
+    db.query(move |conn| {
+        // SQLite takes bare columns (`badges`) from the row that has the max().
+        let sql = format!(
+            "SELECT * FROM (
+                 SELECT user_id, login, display_name, ',' || badges AS b, max(sent_at), count(*)
+                 FROM messages {} GROUP BY coalesce(user_id, login)
+             ) WHERE instr(b, ',moderator/') OR instr(b, ',lead_moderator/') OR instr(b, ',vip/')",
+            filter.sql()
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(&filter.args), |r| {
+            let badges: String = r.get(3)?;
+            Ok(RoleHolder {
+                user_id: r.get(0)?,
+                login: r.get(1)?,
+                display_name: r.get(2)?,
+                role: if badges.contains(",vip/") { "vip" } else { "moderator" },
+                last_at: r.get(4)?,
+                messages: r.get(5)?,
+            })
+        })?;
+        let mut holders: Vec<RoleHolder> = rows.collect::<Result<_, _>>()?;
+        holders.sort_by(|a, b| a.role.cmp(b.role).then(b.messages.cmp(&a.messages)));
+        Ok(holders)
     })
     .await
     .map(Json)
