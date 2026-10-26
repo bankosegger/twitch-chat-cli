@@ -657,6 +657,13 @@ function dataTable(points, bucket, valueHeading = "Messages") {
 const COLLAPSED_KEY = "collapsed-panels";
 const collapsedPanels = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) || "[]"));
 
+/** The page's two columns: `main` beside a narrower `side`. Without side content, `main` gets the full width. */
+function columns(main, side) {
+  side = side.filter(Boolean);
+  if (!side.length) return el("div", {}, main);
+  return el("div", { class: "columns" }, el("div", { class: "col-main" }, main), el("aside", { class: "col-side" }, side));
+}
+
 /**
  * A card with a clickable heading that collapses its body. `key` identifies
  * the panel across views and reloads so its open/closed state is remembered.
@@ -1013,30 +1020,36 @@ async function viewOverview() {
     {},
     el("h1", {}, "Channels"),
     el("p", { class: "subtitle" }, `${fmtInt(total)} messages across ${channels.length} channel${channels.length === 1 ? "" : "s"}`),
-    storageTiles(storage),
-    el(
-      "p",
-      {},
-      // The server answers with Content-Disposition: attachment, so the page stays put.
-      el("button", { type: "button", class: "secondary", onclick: () => (location.href = "api/download") }, "Download database"),
-    ),
-    watchedPanel(watched),
-    account.root,
-    el(
-      "div",
-      { class: "card" },
-      sortableTable(
-        "channels",
-        [
-          { label: "Channel", value: (c) => c.channel, cell: (c) => el("a", { href: href(`/c/${c.channel}`) }, c.channel) },
-          { label: "Messages", value: (c) => c.messages, cell: (c) => fmtInt(c.messages), num: true },
-          { label: "Recording since", value: (c) => c.first_at, cell: (c) => fmtDateTime(c.first_at) },
-          { label: "Last message", value: (c) => c.last_at, cell: (c) => el("span", { title: fmtDateTime(c.last_at) }, fmtAgo(c.last_at)) },
-        ],
-        channels,
-        // The server's order: most recently active first.
-        { col: 3, desc: true },
-      ),
+    columns(
+      [
+        storageTiles(storage),
+        el(
+          "div",
+          { class: "card" },
+          sortableTable(
+            "channels",
+            [
+              { label: "Channel", value: (c) => c.channel, cell: (c) => el("a", { href: href(`/c/${c.channel}`) }, c.channel) },
+              { label: "Messages", value: (c) => c.messages, cell: (c) => fmtInt(c.messages), num: true },
+              { label: "Recording since", value: (c) => c.first_at, cell: (c) => fmtDateTime(c.first_at) },
+              { label: "Last message", value: (c) => c.last_at, cell: (c) => el("span", { title: fmtDateTime(c.last_at) }, fmtAgo(c.last_at)) },
+            ],
+            channels,
+            // The server's order: most recently active first.
+            { col: 3, desc: true },
+          ),
+        ),
+      ],
+      [
+        watchedPanel(watched),
+        account.root,
+        el(
+          "p",
+          {},
+          // The server answers with Content-Disposition: attachment, so the page stays put.
+          el("button", { type: "button", class: "secondary", onclick: () => (location.href = "api/download") }, "Download database"),
+        ),
+      ],
     ),
   );
   view.onMount = account.live;
@@ -1089,11 +1102,11 @@ async function viewChannel(channel, params) {
       el("button", { type: "button", class: "small danger push-right", onclick: () => deleteBox.open() }, "Delete channel data…"),
     ),
     deleteBox.root,
-    streamPanel(channel, Boolean(stats.live)),
   ];
+  const stream = streamPanel(channel, Boolean(stats.live));
 
   if (!stats.messages) {
-    return el("div", {}, header, el("div", { class: "card empty" }, `No messages in the last ${range.label}.`));
+    return el("div", {}, header, stream, el("div", { class: "card empty" }, `No messages in the last ${range.label}.`));
   }
 
   const start = from ?? stats.first_at;
@@ -1124,46 +1137,52 @@ async function viewChannel(channel, params) {
 
   const fullscreenButton = el("button", { type: "button", class: "small push-right" }, "Fullscreen");
   const chatPanel = panel("latest-messages", ["Latest messages", fullscreenButton], composer(channel, chatAccount), latest.root);
+  chatPanel.classList.add("chat");
   const exitFullscreen = fullscreenToggle(chatPanel, fullscreenButton);
 
   const view = el(
     "div",
     {},
     header,
-    chatPanel,
-    el(
-      "div",
-      { class: "tiles" },
-      statTile("Messages", fmtCompact(stats.messages), `${fmtInt(stats.messages)} total`),
-      statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each on average`),
-      statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
-      statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.subs)} subbed · ${fmtInt(stats.gift_subs)} gifted`),
-      statTile("Bits", fmtCompact(stats.bits), `${fmtInt(stats.cheers)} cheer${stats.cheers === 1 ? "" : "s"}`),
-      hasViewers ? statTile("Peak viewers", fmtCompact(stats.peak_viewers), stats.live ? `${fmtInt(stats.live.viewer_count)} watching now` : "while recording") : null,
-      statTile(
-        "Moderation",
-        fmtCompact(modActions),
-        `${fmtInt(stats.timeouts)} timeout${stats.timeouts === 1 ? "" : "s"} · ${fmtInt(stats.bans)} ban${stats.bans === 1 ? "" : "s"} · ${fmtInt(stats.deletions)} deleted`,
-      ),
-    ),
-    panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
-    hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
-    panel("events", "Subs & events", events.root),
-    moderation ? panel("moderation", "Timeouts, bans & deletions", moderation.root) : null,
-    el(
-      "div",
-      { class: "grid-2" },
-      panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
-      panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
-    ),
-    roles.length
-      ? el(
+    columns(
+      [
+        stream,
+        el(
+          "div",
+          { class: "tiles" },
+          statTile("Messages", fmtCompact(stats.messages), `${fmtInt(stats.messages)} total`),
+          statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each on average`),
+          statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
+          statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.subs)} subbed · ${fmtInt(stats.gift_subs)} gifted`),
+          statTile("Bits", fmtCompact(stats.bits), `${fmtInt(stats.cheers)} cheer${stats.cheers === 1 ? "" : "s"}`),
+          hasViewers ? statTile("Peak viewers", fmtCompact(stats.peak_viewers), stats.live ? `${fmtInt(stats.live.viewer_count)} watching now` : "while recording") : null,
+          statTile(
+            "Moderation",
+            fmtCompact(modActions),
+            `${fmtInt(stats.timeouts)} timeout${stats.timeouts === 1 ? "" : "s"} · ${fmtInt(stats.bans)} ban${stats.bans === 1 ? "" : "s"} · ${fmtInt(stats.deletions)} deleted`,
+          ),
+        ),
+        panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
+        hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
+        panel("events", "Subs & events", events.root),
+        moderation ? panel("moderation", "Timeouts, bans & deletions", moderation.root) : null,
+        el(
           "div",
           { class: "grid-2" },
-          panel("moderators", "Moderators", rolesTable(roles, "moderator")),
-          panel("vips", "VIPs", rolesTable(roles, "vip")),
-        )
-      : null,
+          panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
+          panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
+        ),
+        roles.length
+          ? el(
+              "div",
+              { class: "grid-2" },
+              panel("moderators", "Moderators", rolesTable(roles, "moderator")),
+              panel("vips", "VIPs", rolesTable(roles, "vip")),
+            )
+          : null,
+      ],
+      [chatPanel],
+    ),
   );
 
   view.onMount = () => {
@@ -1441,8 +1460,7 @@ async function viewSearch(params) {
     el("p", { class: "subtitle" }, "Every word must appear; words match as prefixes (kek finds KEKW). Newest first."),
     form,
     chips.length ? el("div", { class: "filters" }, chips) : null,
-    moderated ? panel("search-moderation", "Timeouts, bans & deletions", moderation.root) : null,
-    el("div", { class: "card" }, results.root),
+    columns([el("div", { class: "card" }, results.root)], [moderated ? panel("search-moderation", "Timeouts, bans & deletions", moderation.root) : null]),
   );
   view.onMount = () => {
     if (!current.q && !current.login) qInput.focus();
@@ -1505,52 +1523,58 @@ async function viewUser(userId) {
       `@${current.login} · user id ${user.user_id}`,
       others.length ? ` · previously ${others.map((n) => n.display_name).join(", ")}` : "",
     ),
-    el(
-      "div",
-      { class: "tiles" },
-      statTile("Messages", fmtCompact(total), `${fmtInt(total)} total`),
-      statTile("First seen", dayFmt.format(new Date(Math.min(...user.channels.map((c) => c.first_at)))), fmtAgo(Math.min(...user.channels.map((c) => c.first_at)))),
-      statTile("Last seen", dayFmt.format(new Date(current.last_at)), fmtAgo(current.last_at)),
-    ),
-    panel(
-      "user-channels",
-      "Channels",
-      el(
-        "table",
-        {},
-        el(
-          "thead",
-          {},
+    columns(
+      [
+        panel(
+          "user-channels",
+          "Channels",
           el(
-            "tr",
+            "table",
             {},
-            el("th", {}, "Channel"),
-            el("th", { class: "num" }, "Messages"),
-            totalEvents ? el("th", { class: "num" }, "Subs & events") : null,
-            el("th", {}, "First seen"),
-            el("th", {}, "Last seen"),
-          ),
-        ),
-        el(
-          "tbody",
-          {},
-          user.channels.map((c) =>
             el(
-              "tr",
+              "thead",
               {},
-              el("td", {}, el("a", { href: href("/search", { channel: c.channel, user_id: userId }) }, c.channel)),
-              el("td", { class: "num" }, fmtInt(c.messages)),
-              totalEvents ? el("td", { class: "num" }, fmtInt(c.events)) : null,
-              el("td", {}, fmtDateTime(c.first_at)),
-              el("td", {}, fmtDateTime(c.last_at)),
+              el(
+                "tr",
+                {},
+                el("th", {}, "Channel"),
+                el("th", { class: "num" }, "Messages"),
+                totalEvents ? el("th", { class: "num" }, "Subs & events") : null,
+                el("th", {}, "First seen"),
+                el("th", {}, "Last seen"),
+              ),
+            ),
+            el(
+              "tbody",
+              {},
+              user.channels.map((c) =>
+                el(
+                  "tr",
+                  {},
+                  el("td", {}, el("a", { href: href("/search", { channel: c.channel, user_id: userId }) }, c.channel)),
+                  el("td", { class: "num" }, fmtInt(c.messages)),
+                  totalEvents ? el("td", { class: "num" }, fmtInt(c.events)) : null,
+                  el("td", {}, fmtDateTime(c.first_at)),
+                  el("td", {}, fmtDateTime(c.last_at)),
+                ),
+              ),
             ),
           ),
         ),
-      ),
+        panel("user-messages", "Messages", messages.root),
+      ],
+      [
+        el(
+          "div",
+          { class: "tiles" },
+          statTile("Messages", fmtCompact(total), `${fmtInt(total)} total`),
+          statTile("First seen", dayFmt.format(new Date(Math.min(...user.channels.map((c) => c.first_at)))), fmtAgo(Math.min(...user.channels.map((c) => c.first_at)))),
+          statTile("Last seen", dayFmt.format(new Date(current.last_at)), fmtAgo(current.last_at)),
+        ),
+        events ? panel("user-events", "Subs & events", events.root) : null,
+        moderated ? panel("user-moderation", "Timeouts, bans & deletions", moderation.root) : null,
+      ],
     ),
-    events ? panel("user-events", "Subs & events", events.root) : null,
-    moderated ? panel("user-moderation", "Timeouts, bans & deletions", moderation.root) : null,
-    panel("user-messages", "Messages", messages.root),
   );
   view.onMount = () => {
     const stops = [messages.live(), events?.live()];

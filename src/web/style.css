@@ -61,7 +61,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .topbar nav a.active { color: var(--text-primary); font-weight: 600; }
 
 main {
-  max-width: 1000px;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 16px;
   transition: opacity 120ms;
@@ -92,6 +92,23 @@ h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
 .grid-2 > .card { margin-bottom: 0; }
 /* Let a collapsed panel shrink instead of stretching to its neighbour. */
 .grid-2 { align-items: start; }
+
+/* Two-column pages; the side column drops below on narrow screens. */
+.columns { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 12px; align-items: start; }
+.col-main, .col-side { min-width: 0; }
+/* Chat stays in view beside the page and scrolls on its own. */
+.col-side > .panel.chat[open]:not(.fullscreen) {
+  position: sticky;
+  top: 56px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 68px);
+}
+.col-side > .panel.chat[open]:not(.fullscreen) > .panel-body { overflow-y: auto; min-height: 0; }
+@media (max-width: 900px) {
+  .columns { grid-template-columns: minmax(0, 1fr); }
+  .col-side > .panel.chat[open]:not(.fullscreen) { position: static; max-height: 70vh; }
+}
 
 /* Collapsible panels. The summary's negative margin makes the whole card
    header clickable. */
