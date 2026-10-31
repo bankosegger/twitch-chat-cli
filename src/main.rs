@@ -11,7 +11,7 @@ use std::env;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
@@ -118,6 +118,9 @@ async fn main() -> io::Result<()> {
     result
 }
 
+/// The TUI redraws at most this often.
+const FRAME_INTERVAL: Duration = Duration::from_millis(100);
+
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     channel: String,
@@ -138,9 +141,19 @@ async fn run(
     let mut events = EventStream::new();
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
+    let mut last_draw = Instant::now();
+    let mut dirty = false;
 
     loop {
-        let mut dirty = false;
+        // Redrawing per message can't keep up with a busy chat on slow
+        // hardware; the backlog then stalls the IRC reader until Twitch drops
+        // the connection. Changes are batched into at most one frame per
+        // FRAME_INTERVAL instead.
+        let wait = if dirty {
+            FRAME_INTERVAL.saturating_sub(last_draw.elapsed())
+        } else {
+            Duration::from_millis(500)
+        };
 
         tokio::select! {
             maybe_event = events.next() => {
@@ -226,15 +239,17 @@ async fn run(
                     dirty = true;
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = tokio::time::sleep(wait) => {}
         }
 
         if app.should_quit {
             return Ok(());
         }
 
-        if dirty {
+        if dirty && last_draw.elapsed() >= FRAME_INTERVAL {
             terminal.draw(|f| ui::draw(f, &mut app))?;
+            last_draw = Instant::now();
+            dirty = false;
         }
     }
 }

@@ -44,6 +44,10 @@ const MOD_HIGHLIGHT_BG: Color = Color::Rgb(20, 60, 30);
 const SUB_HIGHLIGHT_BG: Color = Color::Rgb(55, 25, 65);
 const EVENT_BG: Color = Color::Rgb(30, 22, 45);
 const BITS_COLOR: Color = Color::Rgb(255, 196, 60);
+/// Secondary text: badges, labels, hints, deleted messages. Not DarkGray,
+/// which the Linux console (e.g. a Raspberry Pi without a desktop) draws as
+/// black, i.e. invisible.
+const DIM: Color = Color::Gray;
 
 fn is_mod(msg: &ChatMessage) -> bool {
     msg.badges.iter().any(|b| b == "MOD" || b == "BROADCASTER")
@@ -71,7 +75,7 @@ fn build_tokens(msg: &ChatMessage, bg: Option<Color>, deleted: bool) -> Vec<Toke
             None => style,
         };
         if deleted {
-            style.fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT)
+            style.fg(DIM).add_modifier(Modifier::CROSSED_OUT)
         } else {
             style
         }
@@ -87,7 +91,7 @@ fn build_tokens(msg: &ChatMessage, bg: Option<Color>, deleted: bool) -> Vec<Toke
     for badge in &msg.badges {
         tokens.push(Token {
             text: format!("[{badge}]"),
-            style: apply_bg(Style::default().fg(Color::DarkGray)),
+            style: apply_bg(Style::default().fg(DIM)),
         });
     }
 
@@ -237,7 +241,7 @@ fn moderation_tokens(action: &ModAction) -> Vec<Token> {
         ModKind::Clear => "⊘ chat was cleared by a moderator".to_string(),
         ModKind::Delete => format!("⊘ a message from {who} was deleted"),
     };
-    let style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+    let style = Style::default().fg(DIM).add_modifier(Modifier::ITALIC);
     text.split_whitespace()
         .map(|word| Token {
             text: word.to_string(),
@@ -304,7 +308,7 @@ fn status_line(app: &App) -> Line<'static> {
 }
 
 fn stream_panel(app: &App) -> Paragraph<'static> {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(DIM);
     let (line1, line2) = match &app.stream_panel {
         StreamPanel::Disabled => (
             Line::from(Span::styled("stream info disabled", dim)),
@@ -400,7 +404,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matched.is_empty() && !effective_filter.is_empty() {
         all_lines.push(Line::from(Span::styled(
             format!("no messages match \"{effective_filter}\""),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(DIM),
         )));
     } else {
         for item in &matched {
@@ -428,7 +432,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Span::styled("█", Style::default().fg(Color::Cyan)),
             Span::styled(
                 "   Enter apply · Esc cancel · Ctrl+U clear",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(DIM),
             ),
         ])
     } else {
@@ -440,25 +444,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let mods_style = if app.highlight_mods {
             Style::default().fg(Color::White).bg(MOD_HIGHLIGHT_BG).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(DIM)
         };
         let subs_style = if app.highlight_subs {
             Style::default().fg(Color::White).bg(SUB_HIGHLIGHT_BG).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(DIM)
         };
         Line::from(vec![
             Span::raw(count),
             Span::styled(
                 "/ filter   ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(DIM),
             ),
             Span::styled(" M mods ", mods_style),
             Span::raw(" "),
             Span::styled(" S subs ", subs_style),
             Span::styled(
                 "   ↑/↓ PgUp/PgDn Home/End scroll   q quit",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(DIM),
             ),
         ])
     };

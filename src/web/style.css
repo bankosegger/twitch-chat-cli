@@ -381,6 +381,14 @@ details.data-table .scroll { max-height: 280px; overflow: auto; margin-top: 6px;
 }
 .panel.fullscreen:hover > .fullscreen-exit, .fullscreen-exit:focus-visible { opacity: 1; }
 body.no-scroll { overflow: hidden; }
+/* Unattended display: nothing to scroll or click. */
+body.kiosk { overflow: hidden; }
+body.kiosk .topbar { display: none; }
+.panel.kiosk { overflow: hidden; }
+.panel.kiosk .time { display: none; }
+.panel.kiosk:is(.rotate-90, .rotate-270) { inset: auto; top: 0; left: 0; width: 100vh; height: 100vw; }
+.panel.kiosk.rotate-90 { transform-origin: top left; transform: translateX(100vw) rotate(90deg); }
+.panel.kiosk.rotate-270 { transform-origin: top left; transform: translateY(100vh) rotate(-90deg); }
 
 /* Subs, raids and other events */
 .msg.event { --event: #22d3ee; box-shadow: inset 2px 0 var(--event); }

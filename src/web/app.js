@@ -405,7 +405,7 @@ const LIVE_POLL_MS = 2000;
  * new messages, adding them at the top, and returns a function that stops it.
  * `source` switches it to another paged endpoint, such as events.
  */
-function pagedMessages(params, { showChannel = false, emptyText = "No messages.", source = MESSAGES } = {}) {
+function pagedMessages(params, { showChannel = false, emptyText = "No messages.", source = MESSAGES, maxRows = Infinity } = {}) {
   const list = el("ul", { class: "messages" });
   const footer = el("div", { class: "more" });
   const root = el("div", {}, list, footer);
@@ -439,6 +439,7 @@ function pagedMessages(params, { showChannel = false, emptyText = "No messages."
       return row;
     });
     list.prepend(...rows);
+    while (list.children.length > maxRows) list.lastChild.remove();
     if (list.children.length === rows.length) footer.querySelector("p.muted")?.remove();
   }
 
@@ -1202,6 +1203,25 @@ async function viewChannel(channel, params) {
   return view;
 }
 
+/**
+ * Just the live chat, filling the screen, for an unattended display such as a
+ * Raspberry Pi kiosk: no stream, charts or controls, and only the newest rows
+ * are kept so a page left open for days doesn't grow without bound.
+ * `?size=` sets the text size in px; `?rotate=90` or `270` turns the page for
+ * a monitor mounted on its side, for browsers that can't rotate the display.
+ */
+async function viewKiosk(channel, params) {
+  await loadChannelImages([channel]);
+  const latest = pagedMessages({ channel, limit: 50 }, { emptyText: "Waiting for messages…", maxRows: 150 });
+  const node = el("div", { class: "card panel chat fullscreen kiosk" }, el("div", { class: "panel-body" }, latest.root));
+  const size = Number(params.get("size"));
+  if (size > 0) node.style.fontSize = `${size}px`;
+  const rotate = params.get("rotate");
+  if (rotate === "90" || rotate === "270") node.classList.add(`rotate-${rotate}`);
+  node.onMount = () => latest.live();
+  return node;
+}
+
 /** Page title with the Twitch profile picture when available. */
 function profileHeading(profile, fallbackName) {
   return el(
@@ -1611,6 +1631,7 @@ async function render() {
   try {
     if (!section) view = await viewOverview();
     else if (section === "c" && arg) view = await viewChannel(arg.toLowerCase(), params);
+    else if (section === "kiosk" && arg) view = await viewKiosk(arg.toLowerCase(), params);
     else if (section === "search") view = await viewSearch(params);
     else if (section === "m" && arg) view = await viewContext(arg);
     else if (section === "u" && arg) view = await viewUser(arg);
@@ -1624,6 +1645,7 @@ async function render() {
   unmount = null;
   main.replaceChildren(view);
   main.classList.remove("loading");
+  document.body.classList.toggle("kiosk", section === "kiosk");
   // onMount may return a cleanup function, run before the next page replaces this one.
   const cleanup = view.onMount ? view.onMount() : null;
   if (typeof cleanup === "function") unmount = cleanup;
