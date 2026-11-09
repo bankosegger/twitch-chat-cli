@@ -146,10 +146,13 @@ pub async fn run(db_path: &Path, bind: SocketAddr, password: Option<String>, tok
     }
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    let addr = listener.local_addr()?;
+    // The Twitch embed only works on a hostname, so point people at localhost.
+    let shown = if addr.ip().is_loopback() { format!("localhost:{}", addr.port()) } else { addr.to_string() };
     eprintln!(
         "serving {} on http://{}{}",
         db_path.display(),
-        listener.local_addr()?,
+        shown,
         if auth_enabled { " (password protected)" } else { "" }
     );
     axum::serve(listener, app)

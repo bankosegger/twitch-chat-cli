@@ -1019,11 +1019,13 @@ async function viewOverview() {
   const view = el(
     "div",
     {},
-    el("h1", {}, "Channels"),
-    el("p", { class: "subtitle" }, `${fmtInt(total)} messages across ${channels.length} channel${channels.length === 1 ? "" : "s"}`),
+    pageHead(
+      [el("h1", {}, "Channels"), el("p", { class: "subtitle" }, `${fmtInt(total)} messages across ${channels.length} channel${channels.length === 1 ? "" : "s"}`)],
+      [el("button", { type: "button", class: "small", onclick: () => (location.href = "api/download") }, "Download database")],
+    ),
+    storageTiles(storage),
     columns(
       [
-        storageTiles(storage),
         el(
           "div",
           { class: "card" },
@@ -1044,12 +1046,6 @@ async function viewOverview() {
       [
         watchedPanel(watched),
         account.root,
-        el(
-          "p",
-          {},
-          // The server answers with Content-Disposition: attachment, so the page stays put.
-          el("button", { type: "button", class: "secondary", onclick: () => (location.href = "api/download") }, "Download database"),
-        ),
       ],
     ),
   );
@@ -1088,19 +1084,21 @@ async function viewChannel(channel, params) {
   const path = `/c/${channel}`;
   const deleteBox = deleteChannelBox(channel, watched.find((w) => w.channel === channel));
   const header = [
-    profileHeading(profile, channel),
-    el(
-      "p",
-      { class: "subtitle" },
-      el("a", { href: `https://twitch.tv/${encodeURIComponent(channel)}`, target: "_blank", rel: "noopener" }, `twitch.tv/${channel}`),
-      stats.live ? liveLine(stats.live) : null,
-    ),
-    el(
-      "div",
-      { class: "filters" },
-      rangeFilter(path, {}, range.key),
-      el("a", { href: href("/search", { channel }) }, "Search this channel"),
-      el("button", { type: "button", class: "small danger push-right", onclick: () => deleteBox.open() }, "Delete channel data…"),
+    pageHead(
+      [
+        profileHeading(profile, channel),
+        el(
+          "p",
+          { class: "subtitle" },
+          el("a", { href: `https://twitch.tv/${encodeURIComponent(channel)}`, target: "_blank", rel: "noopener" }, `twitch.tv/${channel}`),
+          stats.live ? liveLine(stats.live) : null,
+        ),
+      ],
+      [
+        rangeFilter(path, {}, range.key),
+        el("a", { class: "button-link", href: href("/search", { channel }) }, "Search"),
+        el("button", { type: "button", class: "small danger", onclick: () => deleteBox.open() }, "Delete data…"),
+      ],
     ),
     deleteBox.root,
   ];
@@ -1137,50 +1135,53 @@ async function viewChannel(channel, params) {
   const subsTotal = stats.subs + stats.gift_subs;
 
   const fullscreenButton = el("button", { type: "button", class: "small push-right" }, "Fullscreen");
-  const chatPanel = panel("latest-messages", ["Latest messages", fullscreenButton], composer(channel, chatAccount), latest.root);
+  const chatPanel = panel("latest-messages", ["Chat", fullscreenButton], composer(channel, chatAccount), latest.root);
   chatPanel.classList.add("chat");
   const exitFullscreen = fullscreenToggle(chatPanel, fullscreenButton);
 
+  const feed = (node) => (node.classList.add("feed"), node);
   const view = el(
     "div",
-    {},
+    { class: "dashboard" },
     header,
+    el(
+      "div",
+      { class: "tiles strip" },
+      statTile("Messages", fmtCompact(stats.messages), `${fmtInt(stats.messages)} total`),
+      statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each`),
+      statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
+      hasViewers ? statTile("Peak viewers", fmtCompact(stats.peak_viewers), stats.live ? `${fmtInt(stats.live.viewer_count)} watching now` : "while recording") : null,
+      statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.subs)} subbed · ${fmtInt(stats.gift_subs)} gifted`),
+      statTile("Bits", fmtCompact(stats.bits), `${fmtInt(stats.cheers)} cheer${stats.cheers === 1 ? "" : "s"}`),
+      statTile(
+        "Moderation",
+        fmtCompact(modActions),
+        `${fmtInt(stats.timeouts)} timeouts · ${fmtInt(stats.bans)} bans · ${fmtInt(stats.deletions)} deleted`,
+      ),
+    ),
     columns(
       [
-        stream,
         el(
           "div",
-          { class: "tiles" },
-          statTile("Messages", fmtCompact(stats.messages), `${fmtInt(stats.messages)} total`),
-          statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each on average`),
-          statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
-          statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.subs)} subbed · ${fmtInt(stats.gift_subs)} gifted`),
-          statTile("Bits", fmtCompact(stats.bits), `${fmtInt(stats.cheers)} cheer${stats.cheers === 1 ? "" : "s"}`),
-          hasViewers ? statTile("Peak viewers", fmtCompact(stats.peak_viewers), stats.live ? `${fmtInt(stats.live.viewer_count)} watching now` : "while recording") : null,
-          statTile(
-            "Moderation",
-            fmtCompact(modActions),
-            `${fmtInt(stats.timeouts)} timeout${stats.timeouts === 1 ? "" : "s"} · ${fmtInt(stats.bans)} ban${stats.bans === 1 ? "" : "s"} · ${fmtInt(stats.deletions)} deleted`,
+          { class: "hero" },
+          stream,
+          el(
+            "div",
+            { class: "hero-charts" },
+            panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
+            hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
           ),
         ),
-        panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
-        hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
-        panel("events", "Subs & events", events.root),
-        moderation ? panel("moderation", "Timeouts, bans & deletions", moderation.root) : null,
         el(
           "div",
-          { class: "grid-2" },
+          { class: "grid-auto" },
           panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
           panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
+          feed(panel("events", "Subs & events", events.root)),
+          moderation ? feed(panel("moderation", "Timeouts, bans & deletions", moderation.root)) : null,
+          roles.length ? panel("moderators", "Moderators", rolesTable(roles, "moderator")) : null,
+          roles.length ? panel("vips", "VIPs", rolesTable(roles, "vip")) : null,
         ),
-        roles.length
-          ? el(
-              "div",
-              { class: "grid-2" },
-              panel("moderators", "Moderators", rolesTable(roles, "moderator")),
-              panel("vips", "VIPs", rolesTable(roles, "vip")),
-            )
-          : null,
       ],
       [chatPanel],
     ),
@@ -1222,6 +1223,11 @@ async function viewKiosk(channel, params) {
   return node;
 }
 
+/** Title block on the left, controls on the right; wraps on narrow screens. */
+function pageHead(title, actions) {
+  return el("header", { class: "page-head" }, el("div", { class: "page-title" }, title), el("div", { class: "page-actions" }, actions));
+}
+
 /** Page title with the Twitch profile picture when available. */
 function profileHeading(profile, fallbackName) {
   return el(
@@ -1241,10 +1247,18 @@ function profileHeading(profile, fallbackName) {
 function streamPanel(channel, live) {
   const box = el("div", { class: "stream" });
   const node = panel("stream", "Stream", box);
+  node.classList.add("stream-panel");
   function sync() {
     if (!node.open) return box.replaceChildren();
     if (box.firstChild) return;
-    // Twitch refuses to play unless `parent` names the page's own host.
+    // Twitch refuses to play unless `parent` names the page's own host, and it rejects IP addresses.
+    const host = location.hostname;
+    if (/^[\d.]+$|:/.test(host)) {
+      const url = new URL(location.href);
+      url.hostname = "localhost";
+      const hint = host === "127.0.0.1" || host === "[::1]" ? el("a", { href: url.href }, "Open via localhost") : "Open it via a hostname";
+      return box.append(el("p", { class: "muted" }, "Twitch won't embed the stream on an IP address. ", hint, "."));
+    }
     const src = `https://player.twitch.tv/?${new URLSearchParams({ channel, parent: location.hostname, muted: "true", autoplay: String(live) })}`;
     box.append(el("iframe", { src, title: `${channel} on Twitch`, allowfullscreen: "", allow: "autoplay; fullscreen" }));
   }
@@ -1536,12 +1550,25 @@ async function viewUser(userId) {
   const view = el(
     "div",
     {},
-    profileHeading(profile, current.display_name),
+    pageHead(
+      [
+        profileHeading(profile, current.display_name),
+        el(
+          "p",
+          { class: "subtitle" },
+          `@${current.login} · user id ${user.user_id}`,
+          others.length ? ` · previously ${others.map((n) => n.display_name).join(", ")}` : "",
+        ),
+      ],
+      [],
+    ),
     el(
-      "p",
-      { class: "subtitle" },
-      `@${current.login} · user id ${user.user_id}`,
-      others.length ? ` · previously ${others.map((n) => n.display_name).join(", ")}` : "",
+      "div",
+      { class: "tiles strip" },
+      statTile("Messages", fmtCompact(total), `${fmtInt(total)} total`),
+      statTile("Channels", fmtInt(user.channels.length), null),
+      statTile("First seen", dayFmt.format(new Date(Math.min(...user.channels.map((c) => c.first_at)))), fmtAgo(Math.min(...user.channels.map((c) => c.first_at)))),
+      statTile("Last seen", dayFmt.format(new Date(current.last_at)), fmtAgo(current.last_at)),
     ),
     columns(
       [
@@ -1584,13 +1611,6 @@ async function viewUser(userId) {
         panel("user-messages", "Messages", messages.root),
       ],
       [
-        el(
-          "div",
-          { class: "tiles" },
-          statTile("Messages", fmtCompact(total), `${fmtInt(total)} total`),
-          statTile("First seen", dayFmt.format(new Date(Math.min(...user.channels.map((c) => c.first_at)))), fmtAgo(Math.min(...user.channels.map((c) => c.first_at)))),
-          statTile("Last seen", dayFmt.format(new Date(current.last_at)), fmtAgo(current.last_at)),
-        ),
         events ? panel("user-events", "Subs & events", events.root) : null,
         moderated ? panel("user-moderation", "Timeouts, bans & deletions", moderation.root) : null,
       ],
