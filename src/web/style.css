@@ -61,7 +61,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .topbar nav a.active { color: var(--text-primary); font-weight: 600; }
 
 main {
-  max-width: 1920px;
+  max-width: 1440px;
   margin: 0 auto;
   padding: 16px;
   transition: opacity 120ms;
@@ -96,6 +96,7 @@ h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
 /* Two-column pages; the side column drops below on narrow screens. */
 .columns { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; align-items: start; }
 .col-main, .col-side { min-width: 0; }
+.columns > .col-side { align-self: stretch; }
 /* Chat stays in view beside the page and scrolls on its own. <details> doesn't
    lay out its children as flex items, so the body gets its own height cap:
    viewport minus topbar, page padding and the panel's summary and padding. */
@@ -128,27 +129,29 @@ h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
 }
 .button-link:hover { background: var(--wash); color: var(--text-primary); text-decoration: none; }
 
-/* Channel dashboard: stream beside the charts, then a grid of panels. */
-.hero {
+/* Channel page: numbers and rankings | stream, charts and feeds | chat.
+   Areas reflow to two columns, then one, as the window narrows. */
+.three-col {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: 12px;
-  align-items: start;
-  margin-bottom: 12px;
-}
-.hero > .card, .hero-charts > .card:last-child { margin-bottom: 0; }
-/* A collapsed stream leaves the charts the full row. */
-.hero:has(> .stream-panel:not([open])) { grid-template-columns: minmax(0, 1fr); }
-@media (max-width: 1300px) {
-  .hero { grid-template-columns: minmax(0, 1fr); }
-}
-.grid-auto {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: 280px minmax(0, 1fr) 340px;
+  grid-template-areas: "left main side";
   gap: 12px;
   align-items: start;
 }
-.grid-auto > .card { margin-bottom: 0; }
+.three-col > .col-left { grid-area: left; min-width: 0; }
+.three-col > .col-main { grid-area: main; min-width: 0; }
+/* Stretched so the sticky chat inside can travel the whole page height. */
+.three-col > .col-side { grid-area: side; min-width: 0; align-self: stretch; }
+.col-left .rank li { grid-template-columns: 18px minmax(0, 1fr) 44px 40px; gap: 6px; padding: 0 6px; }
+@media (max-width: 1200px) {
+  .three-col { grid-template-columns: minmax(0, 1fr) 320px; grid-template-areas: "main side" "left side"; }
+}
+@media (max-width: 900px) {
+  .three-col { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "side" "left"; }
+}
+.tiles.stack { grid-template-columns: 1fr 1fr; gap: 8px; }
+.tiles.stack .tile .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.narrow { max-width: 960px; margin: 0 auto; }
 /* Feeds can grow long; keep them the height of their neighbours. */
 .panel.feed > .panel-body { max-height: 440px; overflow-y: auto; }
 

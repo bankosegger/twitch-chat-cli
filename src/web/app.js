@@ -1106,7 +1106,7 @@ async function viewChannel(channel, params) {
   const stream = streamPanel(channel, Boolean(stats.live));
 
   if (!stats.messages) {
-    return el("div", {}, header, el("div", { class: "hero" }, stream, el("div", { class: "card empty" }, `No messages in the last ${range.label}.`)));
+    return el("div", { class: "narrow" }, header, stream, el("div", { class: "card empty" }, `No messages in the last ${range.label}.`));
   }
 
   const start = from ?? stats.first_at;
@@ -1143,48 +1143,40 @@ async function viewChannel(channel, params) {
   const feed = (node) => (node.classList.add("feed"), node);
   const view = el(
     "div",
-    { class: "dashboard" },
+    {},
     header,
     el(
       "div",
-      { class: "tiles strip" },
-      statTile("Messages", fmtCompact(stats.messages), `${fmtInt(stats.messages)} total`),
-      statTile("Unique chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} messages each`),
-      statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
-      hasViewers ? statTile("Peak viewers", fmtCompact(stats.peak_viewers), stats.live ? `${fmtInt(stats.live.viewer_count)} watching now` : "while recording") : null,
-      statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.subs)} subbed · ${fmtInt(stats.gift_subs)} gifted`),
-      statTile("Bits", fmtCompact(stats.bits), `${fmtInt(stats.cheers)} cheer${stats.cheers === 1 ? "" : "s"}`),
-      statTile(
-        "Moderation",
-        fmtCompact(modActions),
-        `${fmtInt(stats.timeouts)} timeouts · ${fmtInt(stats.bans)} bans · ${fmtInt(stats.deletions)} deleted`,
+      { class: "three-col" },
+      el(
+        "div",
+        { class: "col-left" },
+        el(
+          "div",
+          { class: "tiles stack" },
+          statTile("Messages", fmtCompact(stats.messages), `${fmtInt(stats.messages)} total`),
+          statTile("Chatters", fmtCompact(stats.chatters), `${(stats.messages / stats.chatters).toFixed(1)} msgs each`),
+          statTile(`Busiest ${bucket.label}`, fmtCompact(peak.n), `${dayTimeFmt.format(new Date(peak.t))}`),
+          hasViewers ? statTile("Peak viewers", fmtCompact(stats.peak_viewers), stats.live ? `${fmtInt(stats.live.viewer_count)} now` : "while recording") : null,
+          statTile("Subs", fmtCompact(subsTotal), `${fmtInt(stats.gift_subs)} gifted`),
+          statTile("Bits", fmtCompact(stats.bits), `${fmtInt(stats.cheers)} cheer${stats.cheers === 1 ? "" : "s"}`),
+          statTile("Moderation", fmtCompact(modActions), `${fmtInt(stats.timeouts)} timeouts · ${fmtInt(stats.bans)} bans`),
+        ),
+        panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
+        roles.length ? panel("moderators", "Moderators", rolesTable(roles, "moderator")) : null,
+        roles.length ? panel("vips", "VIPs", rolesTable(roles, "vip")) : null,
       ),
-    ),
-    columns(
-      [
-        el(
-          "div",
-          { class: "hero" },
-          stream,
-          el(
-            "div",
-            { class: "hero-charts" },
-            panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
-            hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
-          ),
-        ),
-        el(
-          "div",
-          { class: "grid-auto" },
-          panel("top-chatters", "Top chatters", chattersTable(chatters, stats.messages)),
-          panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
-          feed(panel("events", "Subs & events", events.root)),
-          moderation ? feed(panel("moderation", "Timeouts, bans & deletions", moderation.root)) : null,
-          roles.length ? panel("moderators", "Moderators", rolesTable(roles, "moderator")) : null,
-          roles.length ? panel("vips", "VIPs", rolesTable(roles, "vip")) : null,
-        ),
-      ],
-      [chatPanel],
+      el(
+        "div",
+        { class: "col-main" },
+        stream,
+        panel("activity", `Messages per ${bucket.label}`, chartBox, dataTable(points, bucket)),
+        hasViewers ? panel("viewers", `Peak viewers per ${bucket.label}`, viewersBox, dataTable(viewerPoints, bucket, "Viewers")) : null,
+        feed(panel("events", "Subs & events", events.root)),
+        moderation ? feed(panel("moderation", "Timeouts, bans & deletions", moderation.root)) : null,
+        panel("repeated-messages", "Most repeated messages", repeatedTable(repeated, channel, from)),
+      ),
+      el("aside", { class: "col-side" }, chatPanel),
     ),
   );
 
