@@ -1244,14 +1244,19 @@ function streamPanel(channel, live) {
   function sync() {
     if (!node.open) return box.replaceChildren();
     if (box.firstChild) return;
-    // Twitch refuses to play unless `parent` names the page's own host, and it rejects IP addresses.
+    // Twitch only embeds when `parent` names the page's host, and its CSP (`frame-ancestors https://<parent>`)
+    // then only matches https on the default port; plain http is allowed for localhost alone.
     const host = location.hostname;
+    const watch = el("a", { href: `https://twitch.tv/${encodeURIComponent(channel)}`, target: "_blank", rel: "noopener" }, "Watch on Twitch");
+    let problem = null;
     if (/^[\d.]+$|:/.test(host)) {
       const url = new URL(location.href);
       url.hostname = "localhost";
-      const hint = host === "127.0.0.1" || host === "[::1]" ? el("a", { href: url.href }, "Open via localhost") : "Open it via a hostname";
-      return box.append(el("p", { class: "muted" }, "Twitch won't embed the stream on an IP address. ", hint, "."));
+      problem = ["Twitch won't embed the stream on an IP address. ", host === "127.0.0.1" || host === "[::1]" ? el("a", { href: url.href }, "Open via localhost") : "Open it via a hostname", ". "];
+    } else if (host !== "localhost" && (location.protocol !== "https:" || location.port)) {
+      problem = [`Twitch only embeds the stream on https without a port number, e.g. https://${host}/ (with Tailscale: tailscale serve --https=443). `];
     }
+    if (problem) return box.append(el("p", { class: "muted" }, ...problem, watch, "."));
     const src = `https://player.twitch.tv/?${new URLSearchParams({ channel, parent: location.hostname, muted: "true", autoplay: String(live) })}`;
     box.append(el("iframe", { src, title: `${channel} on Twitch`, allowfullscreen: "", allow: "autoplay; fullscreen" }));
   }
