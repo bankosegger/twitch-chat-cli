@@ -61,7 +61,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .topbar nav a.active { color: var(--text-primary); font-weight: 600; }
 
 main {
-  max-width: 1600px;
+  max-width: 1920px;
   margin: 0 auto;
   padding: 16px;
   transition: opacity 120ms;
@@ -94,18 +94,63 @@ h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
 .grid-2 { align-items: start; }
 
 /* Two-column pages; the side column drops below on narrow screens. */
-.columns { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 12px; align-items: start; }
+.columns { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; align-items: start; }
 .col-main, .col-side { min-width: 0; }
 /* Chat stays in view beside the page and scrolls on its own. <details> doesn't
    lay out its children as flex items, so the body gets its own height cap:
    viewport minus topbar, page padding and the panel's summary and padding. */
 .col-side > .panel.chat:not(.fullscreen) { position: sticky; top: 56px; }
-.col-side > .panel.chat:not(.fullscreen) > .panel-body { max-height: calc(100vh - 136px); overflow-y: auto; }
+.col-side > .panel.chat:not(.fullscreen) > .panel-body { height: calc(100vh - 136px); overflow-y: auto; }
 @media (max-width: 900px) {
   .columns { grid-template-columns: minmax(0, 1fr); }
   .col-side > .panel.chat:not(.fullscreen) { position: static; }
-  .col-side > .panel.chat:not(.fullscreen) > .panel-body { max-height: 70vh; }
+  .col-side > .panel.chat:not(.fullscreen) > .panel-body { height: auto; max-height: 70vh; }
 }
+
+/* Page header: title on the left, controls on the right. */
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+.page-title { min-width: 0; }
+.page-title .subtitle { margin-bottom: 0; }
+.page-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.page-actions:empty { display: none; }
+.button-link {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+}
+.button-link:hover { background: var(--wash); color: var(--text-primary); text-decoration: none; }
+
+/* Channel dashboard: stream beside the charts, then a grid of panels. */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 12px;
+  align-items: start;
+  margin-bottom: 12px;
+}
+.hero > .card, .hero-charts > .card:last-child { margin-bottom: 0; }
+/* A collapsed stream leaves the charts the full row. */
+.hero:has(> .stream-panel:not([open])) { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 1300px) {
+  .hero { grid-template-columns: minmax(0, 1fr); }
+}
+.grid-auto {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.grid-auto > .card { margin-bottom: 0; }
+/* Feeds can grow long; keep them the height of their neighbours. */
+.panel.feed > .panel-body { max-height: 440px; overflow-y: auto; }
 
 /* Collapsible panels. The summary's negative margin makes the whole card
    header clickable. */
@@ -207,6 +252,10 @@ input[type="checkbox"] { min-width: 0; margin: 0; }
 .tile .label { color: var(--text-muted); font-size: 12px; }
 .tile .value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .tile .sub { color: var(--text-muted); font-size: 11px; }
+/* One row of key numbers across the page top. */
+.tiles.strip { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.tiles.strip .tile { border: 0; border-radius: 0; background: none; box-shadow: -1px 0 var(--border), 0 -1px var(--border); }
+.tiles.strip .tile .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Tables */
 table { width: 100%; border-collapse: collapse; }

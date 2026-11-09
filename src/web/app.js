@@ -1021,6 +1021,7 @@ async function viewOverview() {
     {},
     pageHead(
       [el("h1", {}, "Channels"), el("p", { class: "subtitle" }, `${fmtInt(total)} messages across ${channels.length} channel${channels.length === 1 ? "" : "s"}`)],
+      // The server answers with Content-Disposition: attachment, so the page stays put.
       [el("button", { type: "button", class: "small", onclick: () => (location.href = "api/download") }, "Download database")],
     ),
     storageTiles(storage),
@@ -1057,7 +1058,7 @@ function storageTiles(storage) {
   const perMessage = storage.messages ? storage.bytes / storage.messages : 0;
   return el(
     "div",
-    { class: "tiles" },
+    { class: "tiles strip" },
     statTile("Database size", fmtBytes(storage.bytes), perMessage ? `about ${fmtBytes(perMessage)} per message` : null),
     statTile("Messages", fmtCompact(storage.messages), `${fmtInt(storage.messages)} total`),
     statTile(
@@ -1105,7 +1106,7 @@ async function viewChannel(channel, params) {
   const stream = streamPanel(channel, Boolean(stats.live));
 
   if (!stats.messages) {
-    return el("div", {}, header, stream, el("div", { class: "card empty" }, `No messages in the last ${range.label}.`));
+    return el("div", {}, header, el("div", { class: "hero" }, stream, el("div", { class: "card empty" }, `No messages in the last ${range.label}.`)));
   }
 
   const start = from ?? stats.first_at;
